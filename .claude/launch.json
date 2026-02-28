@@ -3,9 +3,9 @@
   "configurations": [
     {
       "name": "Frontend (Vite)",
-      "runtimeExecutable": "bash",
-      "runtimeArgs": ["scripts/start-frontend-dev.sh"],
-      "port": 3000
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
     },
     {
       "name": "Vitest UI",
