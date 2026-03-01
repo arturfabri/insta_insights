@@ -14,10 +14,17 @@ const TOKEN_ENCRYPTION_KEY = Deno.env.get('TOKEN_ENCRYPTION_KEY')!
 const IG_API_BASE = 'https://graph.instagram.com/v21.0'
 const MEDIA_FIELDS =
   'id,media_type,media_product_type,caption,permalink,thumbnail_url,media_url,timestamp,like_count'
-const MAX_POSTS = 200
-/** Stop fetching when this many API calls have been made to leave headroom */
+/** Hard cap on posts per sync run; raised to 400 to support up to 360-day windows */
+const MAX_POSTS = 400
+/** Stop fetching when this many API calls have been made to leave hourly headroom */
 const RATE_CAP = 180
-const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000
+
+const VALID_PERIODS = [90, 180, 360] as const
+type SyncPeriodDays = (typeof VALID_PERIODS)[number]
+
+function cutoffDate(periodDays: SyncPeriodDays): Date {
+  return new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000)
+}
 
 // ─── Instagram API types ─────────────────────────────────────────────────────
 
@@ -107,7 +114,14 @@ Deno.serve(async (req: Request) => {
     const body = await req.json().catch(() => ({})) as {
       accountId?: string
       syncType?: 'initial' | 'manual' | 'cron'
+      syncPeriodDays?: number
     }
+
+    // Validate and default the sync period
+    const periodDays: SyncPeriodDays =
+      VALID_PERIODS.includes(body.syncPeriodDays as SyncPeriodDays)
+        ? (body.syncPeriodDays as SyncPeriodDays)
+        : 90
 
     // ── 3. Fetch account ─────────────────────────────────────────────────────
     let accountQuery = supabase
@@ -175,7 +189,8 @@ Deno.serve(async (req: Request) => {
     let isRateLimited = false
     let cursor: string | undefined
     let fetchMore = true
-    const cutoffDate = new Date(Date.now() - NINETY_DAYS_MS)
+    const cutoff = cutoffDate(periodDays)
+    console.log(`Sync period: ${periodDays} days (cutoff: ${cutoff.toISOString()})`)
 
     try {
       while (fetchMore && postsProcessed < MAX_POSTS && !isRateLimited) {
@@ -196,8 +211,8 @@ Deno.serve(async (req: Request) => {
         const mediaPage = (await mediaRes.json()) as IGMediaPage
 
         for (const item of mediaPage.data) {
-          // Stop at 90-day cutoff
-          if (new Date(item.timestamp) < cutoffDate) {
+          // Stop when post is older than the requested sync window
+          if (new Date(item.timestamp) < cutoff) {
             fetchMore = false
             break
           }

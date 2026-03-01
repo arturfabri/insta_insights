@@ -7,6 +7,23 @@ import { supabaseClient } from '@/lib/supabase'
 
 const META_APP_ID = import.meta.env.VITE_META_APP_ID as string
 
+const SYNC_PERIODS = [
+  { days: 90,  label: '90 days' },
+  { days: 180, label: '180 days' },
+  { days: 360, label: '360 days' },
+] as const
+
+type SyncPeriodDays = 90 | 180 | 360
+
+const PERIOD_STORAGE_KEY = 'insta_insights_sync_period'
+
+function readStoredPeriod(): SyncPeriodDays {
+  const stored = parseInt(localStorage.getItem(PERIOD_STORAGE_KEY) ?? '', 10)
+  return ([90, 180, 360] as const).includes(stored as SyncPeriodDays)
+    ? (stored as SyncPeriodDays)
+    : 90
+}
+
 function buildOAuthUrl(): string {
   const params = new URLSearchParams({
     client_id: META_APP_ID,
@@ -23,6 +40,12 @@ export default function ConnectPage() {
   const { syncStatus } = useSyncStatus()
   const [syncing, setSyncing] = useState(false)
   const [syncInvokeError, setSyncInvokeError] = useState<string | null>(null)
+  const [syncPeriod, setSyncPeriodState] = useState<SyncPeriodDays>(readStoredPeriod)
+
+  const setSyncPeriod = (days: SyncPeriodDays) => {
+    localStorage.setItem(PERIOD_STORAGE_KEY, String(days))
+    setSyncPeriodState(days)
+  }
 
   const lastSynced = useMemo(
     () =>
@@ -46,7 +69,7 @@ export default function ConnectPage() {
     setSyncInvokeError(null)
     try {
       const { error } = await supabaseClient.functions.invoke('instagram-sync', {
-        body: { accountId: account.id },
+        body: { accountId: account.id, syncPeriodDays: syncPeriod },
       })
       if (error) {
         setSyncInvokeError(error.message ?? 'Sync request failed')
@@ -59,7 +82,7 @@ export default function ConnectPage() {
     } finally {
       setSyncing(false)
     }
-  }, [account, syncing, syncStatus, refetch])
+  }, [account, syncing, syncStatus, syncPeriod, refetch])
 
   // Auto-trigger initial sync when account is newly connected (never synced)
   useEffect(() => {
@@ -94,6 +117,7 @@ export default function ConnectPage() {
         )}
 
         <div className="bg-white rounded-xl border border-gray-200 p-6">
+          {/* Account header */}
           <div className="flex items-center gap-3 mb-4">
             <div className="w-10 h-10 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 font-bold text-lg">
               @
@@ -119,6 +143,35 @@ export default function ConnectPage() {
             </span>
           </div>
 
+          {/* Sync period selector */}
+          <div className="border-t border-gray-100 pt-4 mb-4">
+            <p className="text-xs font-medium text-gray-500 mb-2">Sync window</p>
+            <div className="flex gap-2">
+              {SYNC_PERIODS.map(({ days, label }) => (
+                <button
+                  key={days}
+                  onClick={() => setSyncPeriod(days)}
+                  disabled={isSyncing}
+                  className={`flex-1 text-xs px-3 py-1.5 rounded-lg font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                    syncPeriod === days
+                      ? 'bg-brand-600 border-brand-600 text-white'
+                      : 'bg-white border-gray-200 text-gray-600 hover:border-brand-400 hover:text-brand-600'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-gray-400 mt-1.5">
+              {syncPeriod === 360
+                ? 'Up to 400 posts — large accounts may need multiple sync runs.'
+                : syncPeriod === 180
+                ? 'Up to 400 posts from the last 6 months.'
+                : 'Up to 400 posts from the last 3 months.'}
+            </p>
+          </div>
+
+          {/* Last synced + Sync now */}
           <div className="text-sm text-gray-500 border-t border-gray-100 pt-4 flex items-center justify-between">
             <span>Last synced: {lastSynced}</span>
             <button
