@@ -79,7 +79,14 @@ export default function ConnectPage() {
     setSyncing(true)
     setSyncInvokeError(null)
     try {
-      const { error } = await supabaseClient.functions.invoke('instagram-sync', {
+      const { data: syncResult, error } = await supabaseClient.functions.invoke<{
+        success: boolean
+        postsProcessed: number
+        postsUpserted: number
+        insightErrors: number
+        firstInsightError: string | null
+        partial: boolean
+      }>('instagram-sync', {
         body: { accountId: account.id, syncPeriodDays: syncPeriod },
       })
       if (error) {
@@ -96,6 +103,13 @@ export default function ConnectPage() {
         }
         setSyncInvokeError(detail)
       } else {
+        // Log sync result to browser console for diagnostics
+        console.log('[instagram-sync] result:', syncResult)
+        if (syncResult?.insightErrors && syncResult.insightErrors > 0) {
+          console.warn(
+            `[instagram-sync] ${syncResult.insightErrors} insight error(s). First: ${syncResult.firstInsightError}`
+          )
+        }
         // Refetch account so the UI picks up the updated sync_status
         refetch()
       }

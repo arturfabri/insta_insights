@@ -209,6 +209,8 @@ Deno.serve(async (req: Request) => {
     // ── 8–9. Paginate Instagram media + fetch insights ───────────────────────
     let postsProcessed = 0
     let postsUpserted = 0
+    let insightErrors = 0
+    let firstInsightError: string | null = null
     let callCount = 0
     let isRateLimited = false
     let cursor: string | undefined
@@ -279,6 +281,7 @@ Deno.serve(async (req: Request) => {
             const fields = insightFields(item.media_type, isReel)
             const insightsUrl = new URL(`${IG_API_BASE}/${item.id}/insights`)
             insightsUrl.searchParams.set('metric', fields)
+            insightsUrl.searchParams.set('period', 'lifetime')
             insightsUrl.searchParams.set('access_token', accessToken)
 
             const insightsRes = await withRetry(() =>
@@ -293,9 +296,10 @@ Deno.serve(async (req: Request) => {
             // Some posts return a top-level error instead of data.
             // Log code + message so we can diagnose metric name issues.
             if (insightsBody.error) {
-              console.warn(
-                `Insights API error for ${item.id} [code ${insightsBody.error.code}]: ${insightsBody.error.message}`,
-              )
+              const errMsg = `[code ${insightsBody.error.code}] ${insightsBody.error.message}`
+              console.warn(`Insights API error for ${item.id}: ${errMsg}`)
+              insightErrors++
+              if (!firstInsightError) firstInsightError = errMsg
               postsProcessed++
               continue
             }
@@ -369,7 +373,10 @@ Deno.serve(async (req: Request) => {
               isRateLimited = true
               break
             }
-            console.warn(`Insights unavailable for media ${item.id}:`, insightsErr)
+            const errStr = insightsErr instanceof Error ? insightsErr.message : String(insightsErr)
+            console.warn(`Insights unavailable for media ${item.id}: ${errStr}`)
+            insightErrors++
+            if (!firstInsightError) firstInsightError = errStr
           }
 
           postsProcessed++
@@ -420,6 +427,8 @@ Deno.serve(async (req: Request) => {
           success: true,
           postsProcessed,
           postsUpserted,
+          insightErrors,
+          firstInsightError,
           partial: isRateLimited,
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
