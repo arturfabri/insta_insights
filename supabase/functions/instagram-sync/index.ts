@@ -156,11 +156,25 @@ Deno.serve(async (req: Request) => {
     }
 
     // ── 4. Concurrency guard ─────────────────────────────────────────────────
+    // Allow override when the lock is stale (previous run timed out without
+    // updating the status). updated_at is set by the trigger in migration 002
+    // every time sync_status changes, so it reliably records when the lock
+    // was acquired.
+    const STALE_SYNC_MS = 10 * 60 * 1000 // 10 minutes
     if (account.sync_status === 'syncing') {
-      return new Response(JSON.stringify({ error: 'Sync already in progress' }), {
-        status: 409,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+      const lockedSince = new Date(account.updated_at).getTime()
+      const isStale = Date.now() - lockedSince > STALE_SYNC_MS
+      if (!isStale) {
+        return new Response(JSON.stringify({ error: 'Sync already in progress' }), {
+          status: 409,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        })
+      }
+      // Stale lock — the previous run timed out before finishing.
+      // Fall through; step 6 will overwrite sync_status with a fresh timestamp.
+      console.warn(
+        `Stale sync lock on account ${account.id} (locked since ${account.updated_at}). Overriding.`,
+      )
     }
 
     // ── 5. Decrypt access token ──────────────────────────────────────────────

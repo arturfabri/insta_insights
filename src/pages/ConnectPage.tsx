@@ -16,6 +16,8 @@ const SYNC_PERIODS = [
 type SyncPeriodDays = 90 | 180 | 360
 
 const PERIOD_STORAGE_KEY = 'insta_insights_sync_period'
+/** Sync locks older than this are considered stale (Edge Function timed out) */
+const STALE_SYNC_MS = 10 * 60 * 1000 // 10 minutes
 
 function readStoredPeriod(): SyncPeriodDays {
   const stored = parseInt(localStorage.getItem(PERIOD_STORAGE_KEY) ?? '', 10)
@@ -62,9 +64,18 @@ export default function ConnectPage() {
     return new Date(account.token_expires_at) < fourteenDaysFromNow
   }, [account])
 
+  // True when sync_status has been 'syncing' for more than 10 minutes,
+  // which means the Edge Function timed out without updating the status.
+  const isStaleSyncing = useMemo(() => {
+    if (syncStatus !== 'syncing' || !account) return false
+    return Date.now() - new Date(account.updated_at).getTime() > STALE_SYNC_MS
+  }, [syncStatus, account])
+
   // Trigger a sync via the Edge Function
   const invokeSync = useCallback(async () => {
-    if (!account || syncing || syncStatus === 'syncing') return
+    if (!account || syncing) return
+    // Block while an active (non-stale) sync is running
+    if (syncStatus === 'syncing' && !isStaleSyncing) return
     setSyncing(true)
     setSyncInvokeError(null)
     try {
@@ -82,7 +93,7 @@ export default function ConnectPage() {
     } finally {
       setSyncing(false)
     }
-  }, [account, syncing, syncStatus, syncPeriod, refetch])
+  }, [account, syncing, syncStatus, isStaleSyncing, syncPeriod, refetch])
 
   // Auto-trigger initial sync when account is newly connected (never synced)
   useEffect(() => {
@@ -102,13 +113,31 @@ export default function ConnectPage() {
   }
 
   if (account) {
-    const isSyncing = syncing || syncStatus === 'syncing'
+    // isSyncing controls button/pill disabled state.
+    // A stale sync is NOT treated as active — we want UI controls enabled.
+    const isSyncing = syncing || (syncStatus === 'syncing' && !isStaleSyncing)
 
     return (
       <div className="max-w-lg mx-auto mt-16">
         <h1 className="text-2xl font-bold text-gray-900 mb-6">Instagram Account</h1>
 
-        <SyncStatusBanner onRetry={invokeSync} className="mb-4" />
+        {isStaleSyncing ? (
+          <div className="mb-4 flex items-center gap-3 px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
+            <span className="shrink-0">⚠️</span>
+            <span className="flex-1">
+              Sync seems stuck — the previous attempt may have timed out.
+            </span>
+            <button
+              onClick={invokeSync}
+              disabled={syncing}
+              className="shrink-0 font-medium underline underline-offset-2 hover:no-underline disabled:opacity-50"
+            >
+              {syncing ? 'Retrying…' : 'Force retry'}
+            </button>
+          </div>
+        ) : (
+          <SyncStatusBanner onRetry={invokeSync} className="mb-4" />
+        )}
 
         {syncInvokeError && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
