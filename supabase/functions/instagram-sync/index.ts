@@ -11,7 +11,7 @@ const TOKEN_ENCRYPTION_KEY = Deno.env.get('TOKEN_ENCRYPTION_KEY')!
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const IG_API_BASE = 'https://graph.instagram.com/v21.0'
+const IG_API_BASE = 'https://graph.instagram.com/v22.0'
 const MEDIA_FIELDS =
   'id,media_type,media_product_type,caption,permalink,thumbnail_url,media_url,timestamp,like_count'
 /** Hard cap on posts per sync run; raised to 400 to support up to 360-day windows */
@@ -73,28 +73,22 @@ function extractMetric(data: IGInsightMetric[], name: string): number | null {
 
 /** Return the comma-separated insight metric names for the given media type.
  *
- * Constraints discovered with instagram_business_manage_insights (v21.0):
- * - `profile_visits`, `follows`  — NOT valid for any non-Reel media type.
- * - `plays`, `follows`           — NOT available for Reels via Business Login.
- * - `impressions`                — NOT available for non-Reel VIDEO via Business Login.
- * Requesting an unsupported metric causes the ENTIRE insights call to fail
- * with [code 100], dropping all metrics for that post.
- * - Reel watch-time metrics were renamed in v17+:
- *     avg_watch_time_video_viewed → ig_reels_avg_watch_time  (still ms)
- *     total_value_video_views     → ig_reels_video_view_total_time
+ * API v22 (Instagram Platform — Instagram Login):
+ * - `views` is the universal content-view metric for all types, replacing the
+ *   deprecated `impressions` (IMAGE/CAROUSEL), `plays` (Reels), and
+ *   `video_views` (non-Reel VIDEO).
+ * - Reels additionally expose watch-time metrics:
+ *     ig_reels_avg_watch_time          (milliseconds)
+ *     ig_reels_video_view_total_time   (milliseconds)
+ * - `profile_visits`, `follows`, `plays`, `video_views`, `impressions` are
+ *   all deprecated in v22 and must NOT be requested.
  */
-function insightFields(mediaType: string, isReel: boolean): string {
+function insightFields(_mediaType: string, isReel: boolean): string {
   if (isReel) {
-    // 'plays' and 'follows' are NOT available with instagram_business_manage_insights.
-    // Requesting them causes the entire insights call to fail with [100].
-    return 'reach,ig_reels_video_view_total_time,ig_reels_avg_watch_time,saved,shares,comments'
+    return 'reach,views,ig_reels_video_view_total_time,ig_reels_avg_watch_time,saved,shares,comments'
   }
-  if (mediaType === 'VIDEO') {
-    // 'impressions' not available for non-Reel video with instagram_business_manage_insights.
-    return 'reach,video_views,saved,shares,comments'
-  }
-  // IMAGE and CAROUSEL_ALBUM
-  return 'reach,impressions,saved,shares,comments'
+  // IMAGE, VIDEO (non-Reel), CAROUSEL_ALBUM
+  return 'reach,views,saved,shares,comments'
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -310,29 +304,30 @@ Deno.serve(async (req: Request) => {
 
             const insightsData = insightsBody.data ?? []
             const reach = extractMetric(insightsData, 'reach') ?? 0
-            const impressions = extractMetric(insightsData, 'impressions') ?? 0
+            // `views` is the v22 universal content-view metric (replaces impressions /
+            // plays / video_views). Map it to the appropriate DB column by media type.
+            const views = extractMetric(insightsData, 'views') ?? 0
             const saves = extractMetric(insightsData, 'saved') ?? 0
             const shares = extractMetric(insightsData, 'shares') ?? 0
             const comments = extractMetric(insightsData, 'comments') ?? 0
-            const profileVisits =
-              extractMetric(insightsData, 'profile_visits') ?? 0
-            const follows = extractMetric(insightsData, 'follows') ?? 0
             const likes = item.like_count ?? 0
 
-            // Type-specific metrics
+            // Map views → DB columns; keep deprecated columns at 0 / null
+            let impressions = 0
             let plays: number | null = null
             let videoViews: number | null = null
             let avgWatchTimeSec: number | null = null
 
             if (isReel) {
-              plays = extractMetric(insightsData, 'plays')
-              // v17+ renamed these metrics; use the new names
+              plays = views  // Reel view count → plays column
               videoViews = extractMetric(insightsData, 'ig_reels_video_view_total_time')
               const rawAvg = extractMetric(insightsData, 'ig_reels_avg_watch_time')
               // API returns milliseconds — convert to seconds
               avgWatchTimeSec = rawAvg !== null ? rawAvg / 1000 : null
             } else if (item.media_type === 'VIDEO') {
-              videoViews = extractMetric(insightsData, 'video_views')
+              videoViews = views  // non-Reel video view count → video_views column
+            } else {
+              impressions = views  // IMAGE / CAROUSEL view count → impressions column
             }
 
             const engagementRate =
@@ -356,8 +351,8 @@ Deno.serve(async (req: Request) => {
                   comments,
                   shares,
                   saves,
-                  profile_visits: profileVisits,
-                  follows,
+                  profile_visits: 0,
+                  follows: 0,
                   engagement_rate: engagementRate,
                   synced_at: new Date().toISOString(),
                 },
