@@ -84,7 +84,9 @@ function extractMetric(data: IGInsightMetric[], name: string): number | null {
  */
 function insightFields(mediaType: string, isReel: boolean): string {
   if (isReel) {
-    return 'reach,plays,ig_reels_video_view_total_time,ig_reels_avg_watch_time,saved,shares,comments,follows'
+    // 'plays' and 'follows' are NOT available with instagram_business_manage_insights.
+    // Requesting them causes the entire insights call to fail with [100].
+    return 'reach,ig_reels_video_view_total_time,ig_reels_avg_watch_time,saved,shares,comments'
   }
   if (mediaType === 'VIDEO') {
     return 'reach,impressions,video_views,saved,shares,comments'
