@@ -8,6 +8,21 @@ const TOKEN_ENCRYPTION_KEY = Deno.env.get('TOKEN_ENCRYPTION_KEY')!
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
+// Always return HTTP 200 so the Supabase client puts the body in `data` (not in error).
+// Callers check `data.success` to detect failures.
+function ok(payload: Record<string, unknown>) {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  })
+}
+function fail(message: string) {
+  return new Response(JSON.stringify({ success: false, error: message }), {
+    status: 200,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  })
+}
+
 Deno.serve(async (req: Request) => {
   // Handle CORS preflight
   const corsResponse = handleCors(req)
@@ -16,12 +31,7 @@ Deno.serve(async (req: Request) => {
   try {
     // Verify authenticated user via JWT
     const authHeader = req.headers.get('Authorization')
-    if (!authHeader) {
-      return new Response(JSON.stringify({ error: 'Missing authorization header' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
+    if (!authHeader) return fail('Missing authorization header')
 
     // Create admin client to verify user
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -29,21 +39,11 @@ Deno.serve(async (req: Request) => {
       authHeader.replace('Bearer ', '')
     )
 
-    if (authError || !user) {
-      return new Response(JSON.stringify({ error: 'Invalid token' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
+    if (authError || !user) return fail('Invalid token')
 
     const { code, redirectUri } = await req.json() as { code: string; redirectUri: string }
 
-    if (!code || !redirectUri) {
-      return new Response(JSON.stringify({ error: 'Missing code or redirectUri' }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
+    if (!code || !redirectUri) return fail('Missing code or redirectUri')
 
     // Step 1: Exchange code for short-lived token
     const tokenParams = new URLSearchParams({
@@ -59,16 +59,14 @@ Deno.serve(async (req: Request) => {
       body: tokenParams,
     })
 
+    const shortLivedBody = await shortLivedRes.text()
+    console.log('Step1 status:', shortLivedRes.status, 'body:', shortLivedBody)
+
     if (!shortLivedRes.ok) {
-      const err = await shortLivedRes.text()
-      console.error('Short-lived token error:', err)
-      return new Response(JSON.stringify({ error: 'Failed to exchange code for token' }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+      return fail(`Step1 (code→short token): ${shortLivedBody}`)
     }
 
-    const { access_token: shortLivedToken } = await shortLivedRes.json() as { access_token: string }
+    const { access_token: shortLivedToken } = JSON.parse(shortLivedBody) as { access_token: string }
 
     // Step 2: Exchange for long-lived token (valid 60 days)
     const longLivedUrl = new URL('https://graph.instagram.com/access_token')
@@ -77,41 +75,34 @@ Deno.serve(async (req: Request) => {
     longLivedUrl.searchParams.set('access_token', shortLivedToken)
 
     const longLivedRes = await fetch(longLivedUrl.toString())
+    const longLivedBody = await longLivedRes.text()
+    console.log('Step2 status:', longLivedRes.status, 'body:', longLivedBody)
 
     if (!longLivedRes.ok) {
-      const err = await longLivedRes.text()
-      console.error('Long-lived token error:', err)
-      return new Response(JSON.stringify({ error: 'Failed to exchange for long-lived token' }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+      return fail(`Step2 (short→long token): ${longLivedBody}`)
     }
 
-    const { access_token: longLivedToken, expires_in } = await longLivedRes.json() as {
+    const { access_token: longLivedToken, expires_in } = JSON.parse(longLivedBody) as {
       access_token: string
       expires_in: number
     }
 
     // Step 3: Fetch Instagram user info
     const meUrl = new URL('https://graph.instagram.com/me')
-    meUrl.searchParams.set('fields', 'id,username')
+    meUrl.searchParams.set('fields', 'id,username,name')
     meUrl.searchParams.set('access_token', longLivedToken)
 
     const meRes = await fetch(meUrl.toString())
+    const meBody = await meRes.text()
+    console.log('Step3 status:', meRes.status, 'body:', meBody)
 
     if (!meRes.ok) {
-      const err = await meRes.text()
-      console.error('User info error:', err)
-      return new Response(JSON.stringify({ error: 'Failed to fetch Instagram user info' }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+      return fail(`Step3 (/me): ${meBody}`)
     }
 
-    const { id: instagramUserId, username } = await meRes.json() as {
-      id: string
-      username: string
-    }
+    const meData = JSON.parse(meBody) as { id: string; username?: string; name?: string }
+    const instagramUserId = meData.id
+    const username = meData.username ?? meData.name ?? instagramUserId
 
     // Step 4: Encrypt the long-lived token
     const encryptedToken = await encryptToken(longLivedToken, TOKEN_ENCRYPTION_KEY)
@@ -139,21 +130,12 @@ Deno.serve(async (req: Request) => {
 
     if (upsertError) {
       console.error('DB upsert error:', upsertError)
-      return new Response(JSON.stringify({ error: 'Failed to save account' }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+      return fail(`Step5 (DB upsert): ${upsertError.message}`)
     }
 
-    return new Response(
-      JSON.stringify({ success: true, username, instagramUserId }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    return ok({ success: true, username, instagramUserId })
   } catch (err) {
     console.error('Unexpected error:', err)
-    return new Response(JSON.stringify({ error: 'Internal server error' }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    })
+    return fail(`Unexpected error: ${err instanceof Error ? err.message : String(err)}`)
   }
 })

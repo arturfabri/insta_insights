@@ -46,16 +46,27 @@ export default function OAuthCallbackPage() {
           return
         }
 
-        const { error } = await supabaseClient.functions.invoke('instagram-oauth', {
+        const { data, error } = await supabaseClient.functions.invoke<{
+          success: boolean
+          error?: string
+        }>('instagram-oauth', {
           body: {
             code,
             redirectUri: `${window.location.origin}/oauth/callback`,
           },
         })
 
+        // Function always returns HTTP 200, so network/auth errors still set `error`
         if (error) {
           setStatus('error')
           setErrorMessage(error.message ?? 'Failed to connect Instagram account.')
+          return
+        }
+
+        // Application-level failure is in data.success
+        if (!data?.success) {
+          setStatus('error')
+          setErrorMessage(data?.error ?? 'Failed to connect Instagram account.')
           return
         }
 
