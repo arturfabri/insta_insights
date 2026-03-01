@@ -425,16 +425,38 @@ Deno.serve(async (req: Request) => {
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       )
     } catch (syncErr) {
-      console.error('Sync loop error:', syncErr)
+      // Build a descriptive message whether the thrown value is an Error,
+      // a raw Response (thrown by `if (!r.ok) throw r` in fetch calls),
+      // or something else entirely.
+      let errorMessage = 'Unknown sync error'
+      if (syncErr instanceof Error) {
+        errorMessage = syncErr.message
+      } else if (syncErr instanceof Response) {
+        // withRetry rethrows non-429 Responses immediately; extract HTTP status
+        // and, when possible, the JSON error body from the Instagram API.
+        errorMessage = `Instagram API error (HTTP ${syncErr.status})`
+        try {
+          const body = await syncErr.clone().json() as {
+            error?: { message?: string; code?: number }
+          }
+          if (body.error?.message) {
+            errorMessage = body.error.code
+              ? `[${body.error.code}] ${body.error.message}`
+              : body.error.message
+          }
+        } catch {
+          // body wasn't JSON — keep the HTTP-status message
+        }
+      } else {
+        errorMessage = String(syncErr)
+      }
+
+      console.error('Sync loop error:', errorMessage)
 
       // Roll back to error status
       await supabase
         .from('instagram_accounts')
-        .update({
-          sync_status: 'error',
-          sync_error:
-            syncErr instanceof Error ? syncErr.message : 'Unknown sync error',
-        })
+        .update({ sync_status: 'error', sync_error: errorMessage })
         .eq('id', account.id)
 
       if (syncLog) {
@@ -444,15 +466,14 @@ Deno.serve(async (req: Request) => {
             status: 'error',
             posts_fetched: postsProcessed,
             posts_updated: postsUpserted,
-            error_message:
-              syncErr instanceof Error ? syncErr.message : 'Unknown sync error',
+            error_message: errorMessage,
             completed_at: new Date().toISOString(),
           })
           .eq('id', syncLog.id)
       }
 
       return new Response(
-        JSON.stringify({ error: 'Sync failed', details: String(syncErr) }),
+        JSON.stringify({ error: 'Sync failed', details: errorMessage }),
         {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },

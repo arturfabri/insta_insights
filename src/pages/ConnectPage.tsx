@@ -83,7 +83,18 @@ export default function ConnectPage() {
         body: { accountId: account.id, syncPeriodDays: syncPeriod },
       })
       if (error) {
-        setSyncInvokeError(error.message ?? 'Sync request failed')
+        // error.message is always the generic Supabase wrapper text.
+        // Read the actual response body to surface the real reason.
+        let detail = 'Sync request failed'
+        try {
+          const body = await (error.context as Response).text()
+          const parsed = JSON.parse(body) as { error?: string; details?: string }
+          if (parsed.details) detail = parsed.details
+          else if (parsed.error) detail = parsed.error
+        } catch {
+          detail = error.message ?? 'Sync request failed'
+        }
+        setSyncInvokeError(detail)
       } else {
         // Refetch account so the UI picks up the updated sync_status
         refetch()
