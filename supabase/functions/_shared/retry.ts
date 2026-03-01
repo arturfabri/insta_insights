@@ -33,18 +33,17 @@ export async function withRetry<T>(
     } catch (err) {
       lastError = err
 
-      // Do not retry on the final attempt
-      if (attempt === maxRetries) break
+      // Only retry on 429 Too Many Requests — all other errors are fatal
+      const is429 = err instanceof Response && err.status === 429
+      if (!is429 || attempt === maxRetries) break
 
       let delayMs = baseDelayMs * Math.pow(2, attempt) // 1s → 2s → 4s
 
-      // If the thrown value is a Response with a Retry-After header, honour it
-      if (err instanceof Response && err.status === 429) {
-        const retryAfter = err.headers.get('Retry-After')
-        if (retryAfter !== null) {
-          const retryAfterSec = parseInt(retryAfter, 10)
-          if (!isNaN(retryAfterSec)) delayMs = retryAfterSec * 1000
-        }
+      // Honour the Retry-After header if present
+      const retryAfter = (err as Response).headers.get('Retry-After')
+      if (retryAfter !== null) {
+        const retryAfterSec = parseInt(retryAfter, 10)
+        if (!isNaN(retryAfterSec)) delayMs = retryAfterSec * 1000
       }
 
       await new Promise((resolve) => setTimeout(resolve, delayMs))

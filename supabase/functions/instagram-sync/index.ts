@@ -71,16 +71,26 @@ function extractMetric(data: IGInsightMetric[], name: string): number | null {
   return metric.values?.[0]?.value ?? null
 }
 
-/** Return the comma-separated insight metric names for the given media type */
+/** Return the comma-separated insight metric names for the given media type.
+ *
+ * Important API constraints (Graph API v21.0):
+ * - `profile_visits` and `follows` are NOT valid per-media metrics for
+ *   IMAGE / CAROUSEL_ALBUM / VIDEO. Requesting them causes the ENTIRE
+ *   insights call to fail with a top-level error, silently skipping all
+ *   metrics for that post. Only Reels expose `follows` at the media level.
+ * - Reel watch-time metrics were renamed in v17+:
+ *     avg_watch_time_video_viewed   → ig_reels_avg_watch_time  (still ms)
+ *     total_value_video_views       → ig_reels_video_view_total_time
+ */
 function insightFields(mediaType: string, isReel: boolean): string {
   if (isReel) {
-    return 'reach,plays,total_value_video_views,avg_watch_time_video_viewed,saved,shares,comments,profile_visits,follows'
+    return 'reach,plays,ig_reels_video_view_total_time,ig_reels_avg_watch_time,saved,shares,comments,follows'
   }
   if (mediaType === 'VIDEO') {
-    return 'reach,impressions,video_views,saved,shares,comments,profile_visits,follows'
+    return 'reach,impressions,video_views,saved,shares,comments'
   }
   // IMAGE and CAROUSEL_ALBUM
-  return 'reach,impressions,saved,shares,comments,profile_visits,follows'
+  return 'reach,impressions,saved,shares,comments'
 }
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -266,10 +276,11 @@ Deno.serve(async (req: Request) => {
             )
             const insightsBody = (await insightsRes.json()) as IGInsightsResponse
 
-            // Some posts return a top-level error instead of data
+            // Some posts return a top-level error instead of data.
+            // Log code + message so we can diagnose metric name issues.
             if (insightsBody.error) {
               console.warn(
-                `Insights error for ${item.id}: ${insightsBody.error.message}`,
+                `Insights API error for ${item.id} [code ${insightsBody.error.code}]: ${insightsBody.error.message}`,
               )
               postsProcessed++
               continue
@@ -293,11 +304,9 @@ Deno.serve(async (req: Request) => {
 
             if (isReel) {
               plays = extractMetric(insightsData, 'plays')
-              videoViews = extractMetric(insightsData, 'total_value_video_views')
-              const rawAvg = extractMetric(
-                insightsData,
-                'avg_watch_time_video_viewed',
-              )
+              // v17+ renamed these metrics; use the new names
+              videoViews = extractMetric(insightsData, 'ig_reels_video_view_total_time')
+              const rawAvg = extractMetric(insightsData, 'ig_reels_avg_watch_time')
               // API returns milliseconds — convert to seconds
               avgWatchTimeSec = rawAvg !== null ? rawAvg / 1000 : null
             } else if (item.media_type === 'VIDEO') {
@@ -309,29 +318,35 @@ Deno.serve(async (req: Request) => {
                 ? (likes + comments + shares + saves) / reach
                 : null
 
-            await supabase.from('instagram_media_insights').upsert(
-              {
-                media_id_fk: mediaRow.id,
-                user_id: user.id,
-                reach,
-                impressions,
-                plays,
-                video_views: videoViews,
-                avg_watch_time_sec: avgWatchTimeSec,
-                total_watch_time_ms: null, // not available in current API version
-                likes,
-                comments,
-                shares,
-                saves,
-                profile_visits: profileVisits,
-                follows,
-                engagement_rate: engagementRate,
-                synced_at: new Date().toISOString(),
-              },
-              { onConflict: 'media_id_fk' },
-            )
+            const { error: upsertErr } = await supabase
+              .from('instagram_media_insights')
+              .upsert(
+                {
+                  media_id_fk: mediaRow.id,
+                  user_id: user.id,
+                  reach,
+                  impressions,
+                  plays,
+                  video_views: videoViews,
+                  avg_watch_time_sec: avgWatchTimeSec,
+                  total_watch_time_ms: null, // not available in current API version
+                  likes,
+                  comments,
+                  shares,
+                  saves,
+                  profile_visits: profileVisits,
+                  follows,
+                  engagement_rate: engagementRate,
+                  synced_at: new Date().toISOString(),
+                },
+                { onConflict: 'media_id_fk' },
+              )
 
-            postsUpserted++
+            if (upsertErr) {
+              console.error(`Insights upsert failed for ${item.id}:`, upsertErr)
+            } else {
+              postsUpserted++
+            }
           } catch (insightsErr) {
             // Some posts (very old or incompatible) don't support insights.
             // Log and continue — never fail the whole sync for one post.
