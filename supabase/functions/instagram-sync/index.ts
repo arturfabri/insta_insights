@@ -73,14 +73,15 @@ function extractMetric(data: IGInsightMetric[], name: string): number | null {
 
 /** Return the comma-separated insight metric names for the given media type.
  *
- * Important API constraints (Graph API v21.0):
- * - `profile_visits` and `follows` are NOT valid per-media metrics for
- *   IMAGE / CAROUSEL_ALBUM / VIDEO. Requesting them causes the ENTIRE
- *   insights call to fail with a top-level error, silently skipping all
- *   metrics for that post. Only Reels expose `follows` at the media level.
+ * Constraints discovered with instagram_business_manage_insights (v21.0):
+ * - `profile_visits`, `follows`  — NOT valid for any non-Reel media type.
+ * - `plays`, `follows`           — NOT available for Reels via Business Login.
+ * - `impressions`                — NOT available for non-Reel VIDEO via Business Login.
+ * Requesting an unsupported metric causes the ENTIRE insights call to fail
+ * with [code 100], dropping all metrics for that post.
  * - Reel watch-time metrics were renamed in v17+:
- *     avg_watch_time_video_viewed   → ig_reels_avg_watch_time  (still ms)
- *     total_value_video_views       → ig_reels_video_view_total_time
+ *     avg_watch_time_video_viewed → ig_reels_avg_watch_time  (still ms)
+ *     total_value_video_views     → ig_reels_video_view_total_time
  */
 function insightFields(mediaType: string, isReel: boolean): string {
   if (isReel) {
@@ -89,7 +90,8 @@ function insightFields(mediaType: string, isReel: boolean): string {
     return 'reach,ig_reels_video_view_total_time,ig_reels_avg_watch_time,saved,shares,comments'
   }
   if (mediaType === 'VIDEO') {
-    return 'reach,impressions,video_views,saved,shares,comments'
+    // 'impressions' not available for non-Reel video with instagram_business_manage_insights.
+    return 'reach,video_views,saved,shares,comments'
   }
   // IMAGE and CAROUSEL_ALBUM
   return 'reach,impressions,saved,shares,comments'
