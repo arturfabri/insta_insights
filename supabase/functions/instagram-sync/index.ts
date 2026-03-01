@@ -373,7 +373,25 @@ Deno.serve(async (req: Request) => {
               isRateLimited = true
               break
             }
-            const errStr = insightsErr instanceof Error ? insightsErr.message : String(insightsErr)
+            // Extract meaningful error from thrown Response objects
+            let errStr: string
+            if (insightsErr instanceof Response) {
+              errStr = `HTTP ${insightsErr.status}`
+              try {
+                const body = await insightsErr.clone().json() as {
+                  error?: { message?: string; code?: number; error_subcode?: number }
+                }
+                if (body.error?.message) {
+                  errStr = body.error.code
+                    ? `[${body.error.code}] ${body.error.message}`
+                    : body.error.message
+                }
+              } catch { /* keep HTTP status message */ }
+            } else if (insightsErr instanceof Error) {
+              errStr = insightsErr.message
+            } else {
+              errStr = String(insightsErr)
+            }
             console.warn(`Insights unavailable for media ${item.id}: ${errStr}`)
             insightErrors++
             if (!firstInsightError) firstInsightError = errStr
