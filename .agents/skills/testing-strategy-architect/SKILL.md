@@ -1,6 +1,6 @@
 ---
 name: testing-strategy-architect
-description: Trigger when changes introduce or modify behaviour, data flows, RBAC/permissions, RLS/policies/RPC, database migrations, Edge Functions, or any cross-domain access. This skill designs the minimum effective test plan AND implements+executes tests (hybrid). It must fail the task if tests fail.
+description: Trigger when changes introduce or modify behaviour, data flows, RBAC/permissions, RLS/policies/RPC, database migrations, Edge Functions, or any cross-user/tenant access. This skill designs the minimum effective test plan AND implements+executes tests (hybrid). It must fail the task if tests fail.
 ---
 
 # Testing Strategy Architect (Hybrid: Plan + Implement + Run)
@@ -21,7 +21,7 @@ Trigger this skill whenever any change includes one or more of:
 ### A) RBAC / Permissions
 - New roles, permissions, permission checks (`hasPermission`, guards)
 - Access requests / approvals flows
-- Domain switching effects on navigation/routing
+- Auth/session effects on navigation/routing
 - Any “admin-only” config or restricted route
 
 ### B) RLS / Policies / RPC (Supabase)
@@ -33,13 +33,13 @@ Trigger this skill whenever any change includes one or more of:
 
 ### C) Database migrations / schema
 - New/changed tables, columns, indexes, constraints
-- Seed migrations (permissions/roles/domains)
-- Backfills / data migrations (people linkage, etc.)
+- Seed migrations (permissions/roles)
+- Backfills / data migrations (account linkage, ownership, etc.)
 
-### D) Cross-domain / shared entities
-- Shared People/Contacts patterns
-- Any domain-to-domain data lookup
-- Any “approved-only” data exposure rules
+### D) Cross-user / shared entities
+- Shared/cross-user entity patterns
+- Any cross-boundary data lookup
+- Any constrained “safe projection” data exposure rules
 
 ### E) Behavioural changes
 - New workflows or state transitions
@@ -118,15 +118,15 @@ Use existing `package.json` scripts. Do not invoke tools directly (e.g., `vitest
 Preferred commands:
 
 - Unit / integration tests:
-  - `npm run test:run` (Vitest, single run)
+  - `npm run test:unit` (Vitest, single run)
   - `npm run test:watch` (local development only)
   - `npm run test:ui` (optional visual runner)
 
 - Type safety:
   - `npm run typecheck`
 
-- Remote security / RLS / RBAC invariants:
-  - `npm run test:remote:security`
+- Security / RLS / RBAC invariants:
+  - `npm run test:all:security`
 
 - Full quality gate (local pre-CI validation):
   - Run `npm run test:all`
@@ -137,7 +137,7 @@ Rules:
 - Always run tests via `npm run <script>` to mirror CI.
 - Do not invent new CLI commands unless adding a reusable script.
 - Do not modify scripts without justification.
-- `test:remote:security` must never execute against production.
+- `test:all:security` must never execute against production resources.
 - If a required script does not exist, propose the smallest possible script addition before running tests.
 
 ### Supabase security testing options (choose best available)
@@ -150,7 +150,7 @@ Rules:
 ## Test data + environment discipline
 
 ### Principles
-- Use a small, explicit set of test users/roles/domains.
+- Use a small, explicit set of test users/roles/accounts.
 - Prefer seeded fixtures over ad-hoc setup scattered across tests.
 - Never depend on existing remote data being in a certain state.
 
@@ -165,22 +165,22 @@ Rules:
 ## Test directory conventions (repo standard)
 
 This repository stores tests under:
-- `app/tests/**`
+- `src/**/*.{test,spec}.{ts,tsx}`
 
-Do not create or use `app/test/**` or `app/src/test/**`.
-All new tests must be placed under `app/tests/**` and follow the existing domain grouping (e.g., `application/`, `hooks/`, `infrastructure/`, `volunteers/`).
+Do not create ad-hoc test folders outside repo conventions.
+All new frontend tests should live next to source files or in `src/test/**`.
 
 Recommended structure (follow existing):
 
-- `app/tests/application/**`
-- `app/tests/hooks/**`
-- `app/tests/infrastructure/**`
-- `app/tests/volunteers/**`
+- `src/lib/**/*.test.ts`
+- `src/hooks/**/*.test.ts`
+- `src/pages/**/*.test.tsx`
+- `src/components/**/*.test.tsx`
 
 Optionally add:
-- `app/tests/helpers/**` (shared test utilities)
-- `app/tests/fixtures/**` (data builders)
-- `app/tests/security/**` (remote RLS/RPC invariants)
+- `src/test/helpers/**` (shared test utilities)
+- `src/test/fixtures/**` (data builders)
+- `supabase/tests/security/**` (RLS/RPC invariants)
 
 ---
 
@@ -202,7 +202,7 @@ Write a test plan with:
 Plan must include:
 - test name
 - purpose
-- inputs/roles/domains
+- inputs/users/roles/accounts
 - expected result
 
 Prefer the smallest test that proves the invariant:
@@ -221,7 +221,7 @@ Rules:
 - For RPC: test payload is minimal and constrained
 
 ### Step 4 — Execute tests (mandatory)
-Note: All commands must be run from `/app` (see AGENTS.md “Script execution scope”).
+Note: All commands must be run from the repository root.
 
 For non-trivial changes, run:
 - `npm run test:all`
@@ -230,7 +230,7 @@ If the change affects RBAC/RLS/RPC/security-sensitive behaviour, also run:
 - `npm run test:all:security`
 
 For trivial changes, at minimum run:
-- `npm run test:run`
+- `npm run test:unit`
 - `npm run typecheck` (if applicable)
 
 Always use `npm run <script>` — never call Vitest directly.
@@ -248,33 +248,32 @@ Output:
 ## What to test (RBAC/RLS/Migrations focus)
 
 ### RBAC invariants (minimum)
-- Users without a domain role cannot access `/d/:domainKey/*`
-- Domain switcher shows only domains user has roles for
-- Nav items are permission-gated (hidden/disabled) correctly
-- `hasPermission(domainKey, key)` resolves correctly for:
-  - platform role
-  - domain role
-  - multiple roles
+- Unauthenticated users cannot access protected routes.
+- Authenticated users only read/write rows they own (`user_id = auth.uid()`).
+- Nav/actions are gated correctly for authenticated vs unauthenticated state.
+- Permission helpers (if present) resolve correctly for:
+  - allowed role
+  - denied role
   - missing role
 
 ### RLS/RPC invariants (minimum)
 For each new/changed policy or RPC:
 - Allowed user can read expected rows
 - Denied user gets empty results or permission error (as designed)
-- Cross-domain cannot access data via direct table query
+- Cross-user cannot access data via direct table query
 - RPC returns ONLY allowed columns and only allowed rows
 
 Examples:
-- `search_people_for_domain('secretary', 'ann')`:
-  - returns only people linked to APPROVED volunteers + consent=true
-  - does NOT return unapproved volunteer contacts
-  - does NOT return volunteer-only fields
+- `list_media_insights(account_id, q)`:
+  - returns only rows owned by the authenticated user
+  - does NOT leak encrypted tokens or service-only columns
+  - returns only documented projection fields
 
 ### Migration sanity (minimum)
 - Migrations apply cleanly to a fresh db reset
-- Seed migrations insert domains/roles/permissions as expected
-- Unique constraints behave as intended (e.g., people.email uniqueness)
-- Backfill migration links volunteers.person_id correctly (if applicable)
+- Seed migrations insert roles/permissions as expected
+- Unique constraints behave as intended (e.g., one account link per `user_id + ig_user_id`)
+- Backfill migrations preserve account ownership linkage correctly (if applicable)
 
 ---
 
@@ -352,8 +351,8 @@ If tests cannot be run due to missing infrastructure:
 - `*.test.ts` for unit/integration
 - `*.integration.test.ts` for integration
 - `*.security.test.ts` for RBAC/RLS/RPC invariants (or group in `security/`)
-- Keep tests domain-scoped:
-  - `volunteers/*`
-  - `secretary/*`
-  - `halls/*`
-  - `platform/*`
+- Keep tests feature-scoped:
+  - `auth/*`
+  - `instagram-sync/*`
+  - `insights/*`
+  - `recommendations/*`

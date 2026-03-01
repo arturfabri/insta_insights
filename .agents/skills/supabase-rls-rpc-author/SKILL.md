@@ -1,6 +1,6 @@
 ---
 name: supabase-rls-rpc-author
-description: Trigger when a change involves access control, RLS policies, Postgres functions/RPC, cross-domain/tenant data visibility, or any query that must be securely constrained (e.g., People search, scoped dashboards, admin-only config). This skill designs and writes RLS policies and SECURITY DEFINER RPC functions safely.
+description: Trigger when a change involves access control, RLS policies, Postgres functions/RPC, cross-user/tenant data visibility, or any query that must be securely constrained (e.g., media search, scoped dashboards, admin-only config). This skill designs and writes RLS policies and SECURITY DEFINER RPC functions safely.
 ---
 
 # Supabase RLS & RPC Author (Security-First)
@@ -9,7 +9,7 @@ You are the security-focused Supabase expert for this repo. Your job is to ensur
 - Row Level Security (RLS) policies
 - Carefully designed Postgres RPC functions (SECURITY DEFINER where appropriate)
 - Minimal, safe return payloads
-- Least privilege and clear domain scoping
+- Least privilege and clear account/user scoping
 
 You MUST assume the client is untrusted. UI checks do not count as security.
 
@@ -18,8 +18,8 @@ You MUST assume the client is untrusted. UI checks do not count as security.
 ## When to trigger
 Trigger this skill when any of the following is true:
 - A new feature changes *who can see or modify* any data.
-- A feature introduces domain scoping (e.g., volunteers vs secretary vs halls).
-- Shared entities exist (e.g., `people`) and access must be constrained by linkage + status.
+- A feature introduces tenant/user scoping (e.g., account owner vs operator).
+- Shared entities exist (e.g., `instagram_accounts`, `instagram_media`) and access must be constrained by linkage + ownership.
 - New admin/config pages are added.
 - Search endpoints are added (ILIKE/typeahead) and must not leak data.
 - Any developer suggests using a service role key in client code (must be blocked).
@@ -34,7 +34,7 @@ Do not trigger for:
 
 ## Non-negotiable rules
 1. **RLS must be enabled** on tables containing private data.
-2. **Policies must match product rules** (roles/permissions, domain scope, ownership).
+2. **Policies must match product rules** (roles/permissions, user/account scope, ownership).
 3. **Prefer minimal exposure**: return only required columns, never `select *`.
 4. **SECURITY DEFINER functions must be hardened**:
    - set a safe `search_path`
@@ -43,7 +43,7 @@ Do not trigger for:
    - revoke EXECUTE from PUBLIC
    - grant only to appropriate role(s)
 5. **No service role on client**. If privileged operations are needed, use Edge Functions or controlled RPC.
-6. **Cross-domain access must be explicit** (e.g., Secretary can read approved volunteer contact details ONLY via `people`, not `volunteers`).
+6. **Cross-user access must be explicit** (e.g., analytics/operator role can read limited insights via RPC, not raw token tables).
 7. **Verification SQL required**:
    All RLS and RPC migrations must include verification queries at the end that:
    - confirm RLS is enabled on affected tables
@@ -69,7 +69,7 @@ Output:
 Use this rubric:
 
 **Use RLS policies when:**
-- Normal CRUD on a table can be expressed as row filters (domain_id, owner_id, assigned_agent_id, etc.)
+- Normal CRUD on a table can be expressed as row filters (user_id, owner_id, account_id, etc.)
 
 **Use RPC (SECURITY DEFINER) when:**
 - You need complex filtering that is easy to get wrong in client code
@@ -87,7 +87,7 @@ For each affected table:
 - enable RLS
 - create SELECT/INSERT/UPDATE/DELETE policies as needed
 - include explicit `USING` and `WITH CHECK` clauses
-- ensure policies align with “domain + permission” model
+- ensure policies align with “scope + permission” model
 
 ### Step 4 — Draft RPC functions (if needed)
 For each RPC:
@@ -100,7 +100,7 @@ For each RPC:
 
 ### Step 5 — Propose tests
 - test as an unauthorised user
-- test as a domain-scoped user
+- test as an owner-scoped user
 - test as platform admin
 - verify row visibility and write denial for disallowed actions
 
@@ -134,21 +134,21 @@ When invoked, output:
 
 ## Canonical policy patterns (use these)
 
-### A) Domain-scoped read (example)
-- user can SELECT rows only if they have access to the domain and row belongs to that domain
+### A) User-scoped read (example)
+- user can SELECT rows only when `row.user_id = auth.uid()`
 
-### B) Assigned-agent access (example)
-- user can SELECT/UPDATE volunteer rows where `assigned_to_user_id = auth.uid()`
+### B) Account-scoped access (example)
+- user can SELECT/UPDATE media rows where account ownership maps to `auth.uid()`
 
-### C) Shared People constrained by domain linkage (example)
-- secretary can only read people linked to approved volunteers (no volunteer table access)
+### C) Shared data constrained by ownership linkage (example)
+- analysts can only read media/insights linked to authorised accounts (no token table access)
 
 ---
 
 ## Guardrails & pitfalls
 - Avoid policy recursion via views unless you know what you’re doing.
 - Be explicit with `auth.uid()` and avoid ambiguous session assumptions.
-- Never expose a shared table (e.g., `people`) with a permissive SELECT policy.
+- Never expose shared tables (e.g., `instagram_accounts`) with permissive SELECT policies.
 - Keep RPC return payload minimal to prevent accidental leakage.
 - Prefer separate RPC for each “safe projection” rather than broad access.
 
@@ -157,7 +157,7 @@ When invoked, output:
 ## Quick checklist for SECURITY DEFINER RPC
 - [ ] `CREATE OR REPLACE FUNCTION ... SECURITY DEFINER`
 - [ ] `SET search_path = public` (or a locked schema list)
-- [ ] schema-qualified references: `public.people`, `public.volunteers`
+- [ ] schema-qualified references: `public.instagram_accounts`, `public.instagram_media`, `public.instagram_media_insights`
 - [ ] permission check inside function
 - [ ] `REVOKE EXECUTE ON FUNCTION ... FROM PUBLIC;`
 - [ ] `GRANT EXECUTE ON FUNCTION ... TO authenticated;` (or a tighter role)

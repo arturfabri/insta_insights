@@ -1,4 +1,4 @@
-// Database table row types — matches supabase/migrations/001_core_tables.sql
+// Database table row types — matches supabase/migrations/001_core_tables_20260301194643.sql
 
 export type SyncStatus = 'pending' | 'syncing' | 'complete' | 'error' | 'partial'
 export type MediaType = 'IMAGE' | 'VIDEO' | 'CAROUSEL_ALBUM'

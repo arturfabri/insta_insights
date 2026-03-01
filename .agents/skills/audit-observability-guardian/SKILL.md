@@ -67,7 +67,7 @@ Recommended table:
 - `domain_key`
 - `actor_user_id`
 - `action` (string key)
-- `target_type` (e.g., volunteer, person, contract)
+- `target_type` (e.g., instagram_account, media, sync_run, brief_job)
 - `target_id`
 - `metadata` (jsonb)
 - `request_id` / `correlation_id` (optional)
@@ -83,8 +83,8 @@ Use stable, namespaced action keys:
 
 Examples:
 - `rbac.role.granted`
-- `workflow.volunteer.approved`
-- `import.volunteer_csv.processed`
+- `instagram.account.connected`
+- `instagram.sync.completed`
 - `notification.email.sent`
 - `automation.rule.executed`
 
@@ -94,7 +94,7 @@ Rules:
 
 ### Audit action keys vs RBAC permission keys
 
-Audit action keys (e.g., `volunteer.status.changed`) are event identifiers and are NOT RBAC permission keys.
+Audit action keys (e.g., `instagram.media.synced`) are event identifiers and are NOT RBAC permission keys.
 
 They:
 - May follow a similar `<domain>.<resource>.<event>` style
@@ -199,7 +199,7 @@ A change is complete only if:
 - Ensure audit events are append-only (no updates).
 - PII discipline:
   - Store identifiers, not full personal payloads (no addresses, DOBs, emails, phone numbers unless strictly required).
-  - If user-visible identity is needed, store a stable reference (user_id/volunteer_id) and resolve in UI.
+  - If user-visible identity is needed, store a stable reference (user_id/media_id/account_id) and resolve in UI.
 - Retention:
   - Audit events are append-only and should have a retention policy (e.g., 12–24 months) unless legal requirements demand longer.
   - If retention is required, prefer archiving to cold storage rather than deleting silently.

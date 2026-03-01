@@ -7,13 +7,12 @@ description: Trigger when changes add or modify global state, contexts, routing/
 
 You are the frontend architecture and maintainability specialist. Your job is to keep the UI scalable as domains, features, and permissions grow.
 
-This app will gain:
-- domain switcher
-- multiple nav systems
-- RBAC gated UI
-- notifications pane
-- CSV imports
-- admin configuration areas
+This app includes and will grow:
+- auth/session-gated UI
+- Instagram account connection and token lifecycle UX
+- sync status and media feeds
+- insights/recommendations workflows
+- export and content brief tooling
 
 Without discipline, React apps degrade via tangled state, overgrown components, and untestable logic.
 
@@ -22,7 +21,7 @@ Without discipline, React apps degrade via tangled state, overgrown components, 
 ## When to trigger
 Trigger this skill when changes include:
 - New global state or new context providers
-- Domain routing changes (`/d/:domainKey/...`)
+- Route/layout structure changes
 - RBAC gating logic in UI
 - New major feature UI (notifications pane, csv import, admin consoles)
 - Large forms or multi-step modals
@@ -47,7 +46,7 @@ Do not trigger for:
 4) Avoid “god components”:
    - split by responsibility
 5) Ensure domain isolation:
-   - Volunteers UI does not import Secretary internals, etc.
+   - feature modules do not import unrelated feature internals.
 6) Maintain predictable data flow:
    - one source of truth for domain context and permissions
 
@@ -89,7 +88,7 @@ Use this rubric:
 ### Step 3 — Enforce module structure
 Recommend a consistent structure (example):
 
-- `/app/features/<domain>/<feature>/`
+- `/src/features/<feature>/`
   - `components/`
   - `hooks/`
   - `services/` (domain logic)
@@ -97,17 +96,17 @@ Recommend a consistent structure (example):
   - `index.ts`
 
 Shared UI:
-- `/app/components/` (design system components)
+- `/src/components/` (design system components)
 Cross-cutting:
-- `/app/context/` (DomainContext, AuthContext)
+- `/src/context/` (AuthContext, GoalContext, etc.)
 
 ### Step 3.1 Shared boundary contract
 
 Only these locations may be imported across domains:
-- `/app/components/**` (shared UI/design system)
-- `/app/context/**` (cross-cutting providers)
-- `/app/lib/**` or `/app/utils/**` (pure utilities only; no domain rules)
-- `/app/contracts/**` (types/schemas shared across client/server, if applicable)
+- `/src/components/**` (shared UI/design system)
+- `/src/context/**` (cross-cutting providers)
+- `/src/lib/**` (pure utilities and adapters; no feature-only domain rules)
+- `/src/types/**` (types/schemas shared across features)
 
 Domain-specific services, hooks, and components must not be imported across domains.
 If sharing domain logic is required, extract it into an explicit shared module with a clear owner and stable API.
@@ -134,7 +133,7 @@ For heavy lists/typeahead:
 - memoize expensive rows
 - debounce inputs
 - avoid re-render storms via context overuse
-- If context updates frequently, split context (e.g., AuthContext vs PermissionsContext vs DomainContext) or use selector patterns to reduce re-renders.
+- If context updates frequently, split context (e.g., AuthContext vs GoalContext) or use selector patterns to reduce re-renders.
 
 ### Step 5.1 — UX state coverage
 For any data-driven UI, ensure:
@@ -169,7 +168,7 @@ A change is complete only if:
 2) No new “god component” exists:
    - components over ~200 lines must be split by responsibility (UI, logic, data).
 3) Domain isolation is preserved:
-   - feature code does not import from other domains except via shared `/app/components` or explicitly approved shared utilities.
+   - feature code does not import from unrelated features except via shared `/src/components` or explicitly approved shared utilities.
 4) Data access boundaries are respected:
    - components do not call Supabase directly; hooks/services do.
 5) Performance is not degraded for heavy UIs:

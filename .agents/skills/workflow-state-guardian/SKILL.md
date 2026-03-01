@@ -7,7 +7,7 @@ description: Trigger when a feature introduces or changes lifecycle states, appr
 
 You are the workflow integrity specialist for this repo. Your job is to ensure business workflows are **explicit, valid, and enforceable**, not scattered across UI conditionals.
 
-This system already has step-based processes (e.g., volunteer validation). New domains (Halls, Secretary) will introduce more workflows (contracts, meetings, approvals). Without discipline, state logic becomes fragile.
+This system already has step-based processes (e.g., account connect, sync lifecycle, and brief generation). As more Instagram workflows are added, state logic can become fragile without explicit modeling.
 
 ---
 
@@ -50,7 +50,7 @@ Do not trigger for:
 
 ### Step 1 — Define the workflow
 Output:
-- **Entity** (e.g., volunteer, contract, meeting)
+- **Entity** (e.g., instagram_account, media_sync, brief_job)
 - **State field(s)** (e.g., status, step)
 - **Actors** (agent/admin/platform admin)
 - **Events** (approve, reject, assign, restart, schedule, renew)

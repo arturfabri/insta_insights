@@ -6,9 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:all": "npm run typecheck && npm run test:unit",
+    "test:all:security": "npm run test:all",
     "test:watch": "vitest",
     "test:ui": "vitest --ui"
   },

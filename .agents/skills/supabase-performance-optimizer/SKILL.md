@@ -1,6 +1,6 @@
 ---
 name: supabase-performance-optimizer
-description: Trigger when a change introduces or modifies list pages, search, dashboards/counters, joins, aggregations, “latest” feeds, RBAC/domain filtering, RPC functions, or any query likely to grow with data. This skill audits Postgres/Supabase query performance, proposes indexes and query shapes, and validates plans using EXPLAIN/ANALYZE where possible.
+description: Trigger when a change introduces or modifies list pages, search, dashboards/counters, joins, aggregations, “latest” feeds, RBAC/user filtering, RPC functions, or any query likely to grow with data. This skill audits Postgres/Supabase query performance, proposes indexes and query shapes, and validates plans using EXPLAIN/ANALYZE where possible.
 ---
 
 # Supabase Performance Optimizer (Postgres + Supabase)
@@ -20,7 +20,7 @@ This skill is not about micro-optimisations. It is about **making performance a 
 Trigger this skill when any change includes one or more of:
 
 ### A) List pages / feeds
-- new list screens (volunteers list, contracts list, notifications list)
+- new list screens (media feed, insights list, sync log, notifications list)
 - “latest activity” feeds
 - “my assigned items” lists
 - admin tables and reporting pages
@@ -28,19 +28,19 @@ Trigger this skill when any change includes one or more of:
 ### B) Search
 - ILIKE/contains search
 - typeahead/autocomplete search
-- search by email/mobile/name
-- cross-domain safe projections (e.g. People search)
+- search by caption/username/permalink
+- cross-user safe projections (e.g. media lookup)
 
 ### C) Dashboards / counters / aggregates
 - counts by status
 - grouped totals
-- “overdue” or “renewals due” metrics
+- “overdue sync” or “refresh due” metrics
 - KPI cards
 
-### D) Joins / relationships / domain scoping
+### D) Joins / relationships / account scoping
 - joins across multiple tables
-- domain filtering (`domain_id`, `status`, `assigned_to`)
-- shared entities (People) referenced by multiple domains
+- ownership filtering (`user_id`, `instagram_account_id`, `status`)
+- shared entities (accounts/media/insights) referenced by multiple features
 
 ### E) RPC functions and complex queries
 - new RPC functions
@@ -66,7 +66,7 @@ Do not trigger for:
 1. **Hot paths must be paginated.** No unbounded reads.
 2. **Project only needed columns.** No `select *` on hot paths.
 3. **Indexes match query patterns.** Add indexes intentionally (not “maybe”).
-4. **Composite indexes are normal** for domain + status + date + assignment.
+4. **Composite indexes are normal** for user/account + status + date.
 5. **Prefer stable ordering** (created_at/updated_at/id) for pagination.
 6. **Avoid N+1**: batch fetch or join appropriately.
 7. **Search needs strategy**: prefix match, trigram, or FTS — choose deliberately.
@@ -130,39 +130,37 @@ If you cannot run locally:
 
 ## Indexing playbook (use these patterns)
 
-### A) Domain-scoped lists (common)
+### A) User-scoped lists (common)
 Query pattern:
-- `WHERE domain_id = ? ORDER BY created_at DESC LIMIT ?`
+- `WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`
 
 Index:
-- `(domain_id, created_at DESC)` (or `(domain_id, created_at)`; Postgres can scan backwards)
+- `(user_id, created_at DESC)` (or `(user_id, created_at)`; Postgres can scan backwards)
 
 ### B) Status filtered list
 Query:
-- `WHERE domain_id=? AND status=? ORDER BY updated_at DESC LIMIT ?`
+- `WHERE user_id=? AND instagram_account_id=? AND status=? ORDER BY updated_at DESC LIMIT ?`
 
 Index:
-- `(domain_id, status, updated_at DESC)`
+- `(user_id, instagram_account_id, status, updated_at DESC)`
 
-### C) Assigned-to list
+### C) Account media list
 Query:
-- `WHERE domain_id=? AND assigned_to_user_id=? ORDER BY updated_at DESC LIMIT ?`
+- `WHERE user_id=? AND instagram_account_id=? ORDER BY posted_at DESC LIMIT ?`
 
 Index:
-- `(domain_id, assigned_to_user_id, updated_at DESC)`
+- `(user_id, instagram_account_id, posted_at DESC)`
 
-### D) Due/renewal date queries
+### D) Time-window insights queries
 Query:
-- `WHERE domain_id=? AND renewal_date <= now() AND status IN (...) ORDER BY renewal_date ASC LIMIT ?`
+- `WHERE user_id=? AND instagram_account_id=? AND captured_at >= ? ORDER BY captured_at DESC LIMIT ?`
 
 Index:
-- `(domain_id, renewal_date)` plus optionally status:
-- `(domain_id, status, renewal_date)`
+- `(user_id, instagram_account_id, captured_at DESC)`
 
-### E) Unique lookups by email/mobile
-- `UNIQUE (lower(email))` for people
-- index for mobile if used frequently:
-  - `(mobile)` or normalized variant if added later
+### E) Unique lookups by external identifiers
+- `UNIQUE (user_id, ig_user_id)` for connected Instagram accounts
+- `UNIQUE (user_id, instagram_account_id, ig_media_id)` for synced media
 
 ### F) Search strategy choices
 - Prefix search (fast-ish with btree): `email ILIKE 'ann%'` can use index only in some cases; better to store lowercased and use `LIKE 'ann%'`
@@ -170,8 +168,8 @@ Index:
 
 Trigram (when needed):
 - `CREATE EXTENSION IF NOT EXISTS pg_trgm;`
-- `CREATE INDEX ... ON people USING gin (primary_email gin_trgm_ops);`
-- apply similarly to `full_name` where needed
+- `CREATE INDEX ... ON instagram_media USING gin (caption gin_trgm_ops);`
+- apply similarly to `username` fields where needed
 
 **Rule:** don’t add trigram everywhere. Add it only for confirmed `%term%` search hot paths.
 

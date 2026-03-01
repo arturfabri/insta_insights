@@ -1,13 +1,13 @@
 ---
 name: ci-quality-gate-architect
-description: Trigger when changes affect build, dependencies, tests, TypeScript config, Supabase migrations, Edge Functions, or when introducing new features that must be protected by CI. This skill defines and implements a CI quality gate that runs typecheck, unit/integration tests, remote security checks, build verification, and (where feasible) migration/RLS smoke checks. It prevents “works on my machine” by enforcing required checks on PRs.
+description: Trigger when changes affect build, dependencies, tests, TypeScript config, Supabase migrations, Edge Functions, or when introducing new features that must be protected by CI. This skill defines and implements a CI quality gate that runs typecheck, unit/integration tests, security checks, build verification, and (where feasible) migration/RLS smoke checks. It prevents “works on my machine” by enforcing required checks on PRs.
 ---
 
 # CI Quality Gate Architect (Pre-merge Verification)
 
 You are responsible for ensuring this repository has a reliable, repeatable CI/CD quality gate.
 
-This project is growing (multi-domain RBAC, workflows, integrations). Code must not merge unless the quality gate passes.
+This project is growing (auth, workflow, Supabase, and Instagram API integrations). Code must not merge unless the quality gate passes.
 
 ---
 
@@ -45,7 +45,7 @@ In those cases, rely on:
    - typecheck
    - unit/integration tests (Vitest)
    - build verification
-3. For RBAC/RLS/RPC changes: CI must run remote security checks against ccuk-hub-dev (non-destructive).
+3. For RBAC/RLS/RPC or external integration changes: CI must run the security gate (`npm run test:all:security`) in a non-destructive environment.
 4. If any gate fails, the task is failed until fixed.
 5. CI must not depend on Docker for this repo (developer hardware constraint).
 6. CI must never use Supabase service-role keys for client-like security tests.
@@ -55,7 +55,7 @@ In those cases, rely on:
 
 ## Required CI stages (minimum)
 
-Note: All commands must be run from `/app` (see AGENTS.md “Script execution scope”).
+Note: All commands must be run from the repository root.
 
 ### Stage 1 — Install
 - `npm ci` (or deterministic install)
@@ -64,21 +64,21 @@ Note: All commands must be run from `/app` (see AGENTS.md “Script execution sc
 - `npm run typecheck`
 
 ### Stage 3 — Unit + UI integration tests
-- `npm run test:run`
+- `npm run test:unit`
 
 ### Stage 4 — Build verification
 - `npm run build`
 
-### Stage 5 — Remote Security Gate (only when needed)
-- `npm run test:remote:security`
+### Stage 5 — Security Gate (only when needed)
+- `npm run test:all:security`
 
-Remote security gate must:
-- run against the dev environment only
+Security gate must:
+- run against a dev/test environment only
 - validate allow/deny RBAC/RLS invariants using anon key + test users
 
-### Remote security gate contract
+### Security gate contract
 
-The remote security test runner MUST:
+The security test runner MUST:
 - require an explicit `VITE_SUPABASE_URL` allowlist match (dev only)
 - fail fast if URL looks like prod (domain allowlist/denylist)
 - use unique test data prefixes and clean up where applicable
@@ -93,22 +93,20 @@ CI must support conditional execution to keep PRs fast:
 
 ### Always run
 - typecheck
-- test:run
+- test:unit
 - build
 
-### Run remote security checks when
+### Run security checks when
 - files changed include any of:
   - `supabase/migrations/**`
   - `supabase/functions/**`
-  - `app/src/**/rbac/**`
-  - `app/src/**/permissions/**`
-  - `app/src/**/auth/**`
-  - `app/src/**/domains/**`
-  - `app/src/**/rpc/**`
-  - `app/src/**/contracts/**`
-  - `app/scripts/test-remote-security.ts`
+  - `src/context/**`
+  - `src/hooks/**`
+  - `src/lib/**`
+  - `src/types/**`
+  - `scripts/**`
 
-If conditional logic is too complex, run remote security checks on all PRs initially.
+If conditional logic is too complex, run security checks on all PRs initially.
 
 ---
 
@@ -118,7 +116,7 @@ If conditional logic is too complex, run remote security checks on all PRs initi
 2. Use `actions/setup-node` with a specific Node version (e.g. 20.x), not "latest" and not floating LTS.
 3. Cache npm.
 4. Use `npm ci`.
-5. Run commands in `/app`.
+5. Run commands in the repository root.
 
 Secrets required (GitHub Actions):
 - `VITE_SUPABASE_URL`
@@ -128,7 +126,7 @@ Secrets required (GitHub Actions):
 - `TEST_AGENT_EMAIL`
 - `TEST_AGENT_PASSWORD`
 
-The workflow must ensure the remote security harness refuses to run against prod.
+The workflow must ensure security checks refuse to run against prod.
 
 ### Workflow trigger configuration
 
@@ -167,17 +165,17 @@ When invoked, produce:
 A change is complete only if:
 
 1) CI runs on every PR and blocks merge on failure.
-2) CI runs from /app and passes:
+2) CI runs from repository root and passes:
    - npm ci
    - npm run typecheck
-   - npm run test:run
+   - npm run test:unit
    - npm run build
 2.a) For non-trivial changes, run:
     - `npm run test:all`
     If the change affects RBAC/RLS/RPC/security-sensitive behaviour, also run:
     - `npm run test:all:security`
 
-3) Remote security gate runs ONLY when required (or explicitly enabled globally) and:
+3) Security gate runs ONLY when required (or explicitly enabled globally) and:
    - refuses to run against prod
    - uses anon key + test users (no service role)
    - is deterministic and non-destructive
@@ -216,10 +214,10 @@ Branch protection is a platform-level setting and cannot be enforced purely via 
 
 - Do not introduce Docker requirements.
 - Do not introduce heavy E2E tooling for MVP (Cypress/Playwright) unless explicitly asked.
-- Avoid flakiness; keep remote tests minimal, deterministic, and non-destructive.
+- Avoid flakiness; keep security tests minimal, deterministic, and non-destructive.
 - Never print secrets to logs.
 - CI total runtime target: under 5 minutes for standard PRs.
-- Remote security gate target: under 2 minutes.
+- Security gate target: under 2 minutes.
 - If CI exceeds 8 minutes consistently, it must be optimised.
 
 ---
@@ -228,7 +226,7 @@ Branch protection is a platform-level setting and cannot be enforced purely via 
 
 Escalate to testing-strategy-architect when:
 - a new gate requires new tests or new harness logic
-- remote security invariants are unclear or missing
+- security invariants are unclear or missing
 
 Escalate to supabase-guardian when:
 - migration validation requires additional schema/index checks

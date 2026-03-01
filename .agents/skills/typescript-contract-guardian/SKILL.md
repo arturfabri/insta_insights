@@ -3,7 +3,7 @@ name: typescript-contract-guardian
 description: Trigger when changes add or modify any boundary where data crosses
   trust zones, including Supabase queries or RPC responses, CSV imports,
   form submissions, webhooks, Edge Functions, JSON config in DB, and any
-  cross-domain safe projection. This skill enforces TypeScript-first API
+  cross-user safe projection. This skill enforces TypeScript-first API
   contracts plus runtime validation using Zod, ensuring inputs and
   outputs are typed, validated, and consistent.
 ---
@@ -33,14 +33,14 @@ Trigger this skill when any change touches:
 
 -   New or modified table reads
 -   Any RPC function call
--   Cross-domain safe projections (e.g., People search)
+-   Cross-user safe projections (e.g., media lookup/search)
 -   Nested joins or complex queries
 
 ### Inputs from untrusted sources
 
 -   CSV upload or import
 -   Complex forms
--   Route params (domainKey, ids)
+-   Route params (ids, slugs, filters)
 -   Admin configuration inputs
 
 ### Server-side payloads
@@ -70,33 +70,34 @@ Trigger this skill when any change touches:
 
 # Example Schema Pattern
 
-## Safe Projection Example (People search)
+## Safe Projection Example (Media search)
 
 ``` ts
 import { z } from 'zod'
 
-export const PersonSafeSchema = z.object({
+export const MediaSummarySchema = z.object({
   id: z.string().uuid(),
-  fullName: z.string().min(1),
-  email: z.string().email().optional(),
-  mobile: z.string().min(6).optional(),
+  igMediaId: z.string().min(1),
+  caption: z.string().nullable(),
+  mediaType: z.enum(['IMAGE', 'VIDEO', 'CAROUSEL_ALBUM', 'REEL', 'STORY']),
+  postedAt: z.string(),
 })
 
-export type PersonSafe = z.infer<typeof PersonSafeSchema>
+export type MediaSummary = z.infer<typeof MediaSummarySchema>
 ```
 
 ## Validating RPC Output
 
 ``` ts
-const result = await supabase.rpc('people_search', { query })
+const result = await supabase.rpc('list_media_for_user', { query })
 
-const parsed = PersonSafeSchema.array().safeParse(result.data)
+const parsed = MediaSummarySchema.array().safeParse(result.data)
 
 if (!parsed.success) {
-  throw new Error('Invalid PeopleSearch RPC payload')
+  throw new Error('Invalid media list RPC payload')
 }
 
-const people: PersonSafe[] = parsed.data
+const media: MediaSummary[] = parsed.data
 ```
 
 ------------------------------------------------------------------------
@@ -104,19 +105,19 @@ const people: PersonSafe[] = parsed.data
 ## CSV Validation Example
 
 ``` ts
-export const VolunteerCsvRowSchema = z.object({
-  name: z.string().min(1),
-  email: z.string().email(),
-  mobile: z.string().min(6),
-  role: z.string().min(1),
-  placeOfWorship: z.string().min(1),
+export const InsightsCsvRowSchema = z.object({
+  ig_media_id: z.string().min(1),
+  media_type: z.string().min(1),
+  posted_at: z.string().datetime(),
+  reach: z.coerce.number().int().nonnegative(),
+  saves: z.coerce.number().int().nonnegative(),
 })
 ```
 
 Usage:
 
 ``` ts
-const rowResult = VolunteerCsvRowSchema.safeParse(row)
+const rowResult = InsightsCsvRowSchema.safeParse(row)
 
 if (!rowResult.success) {
   return {
@@ -131,12 +132,12 @@ if (!rowResult.success) {
 ## Route Param Validation
 
 ``` ts
-export const DomainKeySchema = z
+export const IdSchema = z.string().uuid()
+
+export const SlugSchema = z
   .string()
   .min(1)
   .regex(/^[a-z0-9-]+$/)
-
-export const IdSchema = z.string().uuid()
 ```
 
 ------------------------------------------------------------------------

@@ -14,7 +14,7 @@ This system includes role-based UI, modals, panes (notification drawer), admin w
 ## When to trigger
 
 Trigger this skill when changes include:
-- Header, navigation, menus, domain switcher
+- Header, navigation, menus, account/session switcher
 - Notification bell and notification pane/drawer
 - Any modal/dialog
 - Any form (create/edit/import)
@@ -105,7 +105,7 @@ Avoid placeholder-only labelling.
 - Inline validation for forms (esp. CSV mapping)
 - Bulk operations show progress and outcome summary
 - Retry paths for failed email/automation actions
-- Aggregated notifications must explain grouping (“3 updates on Volunteer X”)
+- Aggregated notifications must explain grouping (“3 updates on Post X”)
 
 ### Mobile usability
 - Tap targets min ~44px equivalent
@@ -151,7 +151,7 @@ At minimum, add component tests for:
 - critical buttons are reachable by keyboard
 
 Run tests using canonical scripts:
-- `npm run test:run` for component/unit tests
+- `npm run test:unit` for component/unit tests
 - Include a focused test file for overlays/forms where modified
 - Prefer role-based queries (e.g., `getByRole`) over brittle selectors
 
@@ -204,4 +204,3 @@ Work is complete only if:
 - Avoid excessive ARIA; prefer correct HTML semantics first.
 - Do not block delivery for minor copy issues; block only for real usability/accessibility failures.
 - Never add ARIA roles that duplicate native HTML semantics (e.g., role="button" on <button>).
-

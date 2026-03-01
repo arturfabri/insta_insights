@@ -19,7 +19,7 @@ Trigger this skill when any of the following happens:
 - Code reads/writes fields or tables that do not exist yet (or should not exist in the current schema).
 - A change adds/updates permissions, roles, or access rules.
 - A feature needs server-side secrets or privileged operations (webhooks, email provider calls, third-party APIs).
-- A workflow needs controlled cross-domain access (multi-domain, shared people, etc.).
+- A workflow needs controlled cross-user or tenant access.
 - File uploads/downloads are introduced or modified.
 - You see direct client-side operations that should be protected by RLS or done via Edge Function.
 - Performance risks: heavy queries, list pages, search, aggregation, or “latest” feeds.
@@ -85,7 +85,7 @@ Each migration must include a verification section at the end:
 For every table read/write touched:
 - Describe required access rules.
 - Decide: RLS policies vs RPC vs Edge Function.
-- If cross-domain or shared data: strongly prefer RPC or Edge Function to reduce leakage.
+- If cross-user or shared data is involved: strongly prefer RPC or Edge Function to reduce leakage.
 - Make sure “who can see what” is enforceable in SQL.
 
 ### Step 4 — Decide Edge Function vs direct client calls
@@ -94,9 +94,9 @@ Use this decision rubric:
 **Use Edge Functions when:**
 - Secrets are required (service role, provider keys, Graph/SMTP, Stripe, etc.)
 - Webhooks are involved
-- You need privileged access across domains/tenants
+- You need privileged access across users/tenants
 - You need server-side validation or anti-abuse controls
-- You need to hide sensitive query logic (e.g., People search constrained to approved volunteers)
+- You need to hide sensitive query logic (e.g., insights projection with token-safe fields)
 - You need idempotency + retries
 - You need to schedule work or do post-commit side effects (email sending, notifications, etc.)
 
@@ -192,7 +192,7 @@ When suggesting steps, prefer this sequence:
 - Add RLS enablement and policies or RPC strategy
 - Update repositories + types
 
-### B) Cross-domain safe search (People search)
+### B) Cross-user safe search/read model
 - Implement SECURITY DEFINER RPC (careful `search_path`)
 - Revoke public execute; grant only to authenticated
 - Filter in SQL to authorised rows only

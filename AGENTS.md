@@ -10,7 +10,7 @@ This file defines how Codex Agents must operate in this repository.
 
 - **Frontend**: React 18+ with TypeScript
 - **Build Tool**: Vite (fast development and production builds)
-- **Styling**: [CSS Modules/Tailwind/Styled Components - to be determined]
+- **Styling**: Tailwind CSS v4
 - **Backend**: Supabase (PostgreSQL database, Auth, Storage, Edge Functions)
 - **Type Safety**: TypeScript throughout
 
@@ -31,14 +31,14 @@ This file prioritises:
 
 ```
 insta_insights/
-├── .agents/skill          # Codex Skills
+├── .agents/skills         # Codex Skills
 ├── src/
 │   ├── components/        # Reusable React components
 │   ├── pages/            # Page-level components (if using routing)
 │   ├── hooks/            # Custom React hooks (especially for Supabase)
 │   ├── lib/
 │   │   ├── supabase.ts   # Supabase client initialization
-│   │   └── utils.ts      # Utility functions
+│   │   └── ...           # Scoring, pattern extraction, filters, export helpers
 │   ├── types/            # TypeScript type definitions
 │   ├── App.tsx           # Root component
 │   └── main.tsx          # Entry point
@@ -138,6 +138,13 @@ For any non-trivial change, the local core quality gate must pass:
 Additionally, if the change affects security, permissions, Supabase policies/RPC, workflow access rules, or external integrations, the security gate must also pass:
 - `npm run test:all:security` (includes remote security checks)
 
+Transition note (repository alignment):
+- If these two scripts are not yet present in `package.json`, run the equivalent commands directly:
+  - `npx tsc --noEmit`
+  - `npm run test`
+  - `npm run build`
+- Then create/track the follow-up to add canonical `test:all` and `test:all:security` scripts.
+
 Any behavioural change (logic, workflow, permissions, side effects) must include corresponding test coverage updates.
 
 ## Data Access Owner gate (required for data exposure)
@@ -228,6 +235,21 @@ Trigger when:
 
 Purpose:
 Ensure correct query shape, indexing strategy, pagination, and long-term scalability.
+
+### insta-api-guardian
+Trigger when:
+- Instagram Graph API / Meta endpoint usage changes
+- OAuth scope/permission requirements change
+- API version / metric deprecations affect integration logic
+- Host/login model decisions are required (`graph.instagram.com` vs `graph.facebook.com`)
+- Sync logic depends on specific Instagram API fields/parameters
+
+Purpose:
+Enforce correct, documented, and up-to-date Instagram/Meta API integration behaviour.
+
+Default scopes for this project:
+- `instagram_basic`
+- `instagram_manage_insights`
 
 ---
 
@@ -370,18 +392,19 @@ For any non-trivial code change:
 1. design-pattern-advisor (if medium/large scope)
 2. architectural-boundary-guardian
 3. supabase-guardian (if feature touches data)
-4. supabase-rls-rpc-author (if feature touches access control)
-5. supabase-performance-optimizer (if feature affects queries/lists/search)
-6. workflow-state-guardian (if feature affects lifecycle/state transitions)
-7. typescript-contract-guardian (if boundary involved)
-8. react-architecture-guardian (if feature affects UI structure/state)
-9. frontend-design (only if UI design/aesthetic work is in scope)
-10. mobile-design (only if mobile/responsive behaviour is affected)
-11. a11y-ux-guardian (if interactive UI involved)
-12. testing-strategy-architect (if behaviour or RBAC involved)
-13. ci-quality-gate-architect (if build/test/migration pipeline affected)
-14. code-commenting-quality (final pass before completion)
-15. audit-observability-guardian (if feature affects approvals, side effects, or admin actions)
+4. insta-api-guardian (if feature touches Instagram/Meta API contracts)
+5. supabase-rls-rpc-author (if feature touches access control)
+6. supabase-performance-optimizer (if feature affects queries/lists/search)
+7. workflow-state-guardian (if feature affects lifecycle/state transitions)
+8. typescript-contract-guardian (if boundary involved)
+9. react-architecture-guardian (if feature affects UI structure/state)
+10. frontend-design (only if UI design/aesthetic work is in scope)
+11. mobile-design (only if mobile/responsive behaviour is affected)
+12. a11y-ux-guardian (if interactive UI involved)
+13. testing-strategy-architect (if behaviour or RBAC involved)
+14. ci-quality-gate-architect (if build/test/migration pipeline affected)
+15. code-commenting-quality (final pass before completion)
+16. audit-observability-guardian (if feature affects approvals, side effects, or admin actions)
 
 Non-trivial means any change that:
 - Alters user-visible behaviour
@@ -471,6 +494,11 @@ supabase-rls-rpc-author may escalate to:
 supabase-performance-optimizer may escalate to:
 - supabase-guardian (index/schema changes required)
 - testing-strategy-architect (performance-critical path tests)
+
+insta-api-guardian may escalate to:
+- supabase-guardian (if API integration changes require schema/auth/edge updates)
+- typescript-contract-guardian (if API payload contracts or runtime validation are required)
+- testing-strategy-architect (if integration behaviour requires regression/security coverage)
 
 workflow-state-guardian may escalate to:
 - supabase-guardian (schema support required)
@@ -576,6 +604,7 @@ The matrix is not exhaustive. Complex changes may require additional skills beyo
 | Workflow transitions | workflow-state-guardian, testing-strategy-architect, audit-observability-guardian |
 | File uploads | supabase-guardian, supabase-performance-optimizer |
 | Webhooks/email | supabase-guardian, audit-observability-guardian, testing-strategy-architect |
+| Instagram/Meta API integration changes | insta-api-guardian, supabase-guardian, testing-strategy-architect |
 | Large list/search | supabase-performance-optimizer, testing-strategy-architect |
 | API boundary introduced | typescript-contract-guardian, testing-strategy-architect |
 | Runtime validation missing | typescript-contract-guardian |
@@ -624,6 +653,11 @@ All database changes must:
 Migration naming format:
 `YYYYMMDDHHMMSS_description.sql`
 
+Legacy alignment note:
+- Existing bootstrap migrations may retain numeric prefixes with appended timestamp
+  (example: `001_core_tables_YYYYMMDDHHMMSS.sql`).
+- All new migrations must use the canonical timestamp-first format above.
+
 If a skill introduces or implies schema changes:
 
 - supabase-guardian MUST be triggered.
@@ -632,7 +666,7 @@ If a skill introduces or implies schema changes:
 
 ## Public directory & limited-field exposure (NO shadow tables)
 
-When the product needs a “contact directory” or any **limited projection** of a sensitive entity (e.g., volunteers/employees), the default pattern is:
+When the product needs an account/media directory or any **limited projection** of a sensitive entity (e.g., creators/users), the default pattern is:
 
 **MUST**
 - Use a **Postgres RPC** (preferred) to expose a minimal set of fields (e.g., `full_name`, `email`, `mobile`) to authorised roles.
@@ -641,7 +675,7 @@ When the product needs a “contact directory” or any **limited projection** o
 - Provide stable filtering/search behaviour (e.g., `q` parameter) and apply pagination limits.
 
 **MUST NOT**
-- Create “public”, “directory”, “lookup”, or “mirror” tables (e.g., `public_volunteers`, `volunteer_directory`, `*_public`) **just to make access easier**.
+- Create “public”, “directory”, “lookup”, or “mirror” tables (e.g., `public_instagram_accounts`, `instagram_media_directory`, `*_public`) **just to make access easier**.
 - Duplicate PII into broader-access tables as a shortcut around RLS complexity.
 - Rely on frontend filtering or API-only checks as the enforcement mechanism.
 
