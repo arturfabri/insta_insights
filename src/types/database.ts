@@ -1,6 +1,6 @@
 // Database table row types — matches supabase/migrations/001_core_tables.sql
 
-export type SyncStatus = 'pending' | 'syncing' | 'complete' | 'error'
+export type SyncStatus = 'pending' | 'syncing' | 'complete' | 'error' | 'partial'
 export type MediaType = 'IMAGE' | 'VIDEO' | 'CAROUSEL_ALBUM'
 export type Goal = 'growth' | 'leads'
 export type SyncType = 'initial' | 'manual' | 'cron'

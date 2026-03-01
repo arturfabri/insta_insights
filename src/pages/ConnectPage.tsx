@@ -1,6 +1,9 @@
-import { useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { formatDistanceToNow } from 'date-fns'
 import { useInstagramAccount } from '@/hooks/useInstagramAccount'
+import { useSyncStatus } from '@/hooks/useSyncStatus'
+import SyncStatusBanner from '@/components/SyncStatusBanner'
+import { supabaseClient } from '@/lib/supabase'
 
 const META_APP_ID = import.meta.env.VITE_META_APP_ID as string
 
@@ -15,7 +18,10 @@ function buildOAuthUrl(): string {
 }
 
 export default function ConnectPage() {
-  const { account, loading } = useInstagramAccount()
+  const { account, loading, refetch } = useInstagramAccount()
+  const { syncStatus } = useSyncStatus()
+  const [syncing, setSyncing] = useState(false)
+  const [syncInvokeError, setSyncInvokeError] = useState<string | null>(null)
 
   const lastSynced = useMemo(
     () =>
@@ -32,6 +38,37 @@ export default function ConnectPage() {
     return new Date(account.token_expires_at) < fourteenDaysFromNow
   }, [account])
 
+  // Trigger a sync via the Edge Function
+  const invokeSync = useCallback(async () => {
+    if (!account || syncing || syncStatus === 'syncing') return
+    setSyncing(true)
+    setSyncInvokeError(null)
+    try {
+      const { error } = await supabaseClient.functions.invoke('instagram-sync', {
+        body: { accountId: account.id },
+      })
+      if (error) {
+        setSyncInvokeError(error.message ?? 'Sync request failed')
+      } else {
+        // Refetch account so the UI picks up the updated sync_status
+        refetch()
+      }
+    } catch (err) {
+      setSyncInvokeError(err instanceof Error ? err.message : 'Sync request failed')
+    } finally {
+      setSyncing(false)
+    }
+  }, [account, syncing, syncStatus, refetch])
+
+  // Auto-trigger initial sync when account is newly connected (never synced)
+  useEffect(() => {
+    if (account && !account.last_synced_at && syncStatus !== 'syncing') {
+      void invokeSync()
+    }
+  // Only run once when account first becomes available
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account?.id])
+
   if (loading) {
     return (
       <div className="max-w-lg mx-auto mt-16 flex justify-center">
@@ -41,10 +78,19 @@ export default function ConnectPage() {
   }
 
   if (account) {
+    const isSyncing = syncing || syncStatus === 'syncing'
 
     return (
       <div className="max-w-lg mx-auto mt-16">
         <h1 className="text-2xl font-bold text-gray-900 mb-6">Instagram Account</h1>
+
+        <SyncStatusBanner onRetry={invokeSync} className="mb-4" />
+
+        {syncInvokeError && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            {syncInvokeError}
+          </div>
+        )}
 
         <div className="bg-white rounded-xl border border-gray-200 p-6">
           <div className="flex items-center gap-3 mb-4">
@@ -55,21 +101,39 @@ export default function ConnectPage() {
               <p className="font-semibold text-gray-900">@{account.username}</p>
               <p className="text-sm text-gray-500">Connected</p>
             </div>
-            <span className={`ml-auto text-xs px-2 py-1 rounded-full font-medium ${
-              account.sync_status === 'complete'
-                ? 'bg-green-100 text-green-700'
-                : account.sync_status === 'syncing'
-                ? 'bg-blue-100 text-blue-700'
-                : account.sync_status === 'error'
-                ? 'bg-red-100 text-red-700'
-                : 'bg-gray-100 text-gray-600'
-            }`}>
-              {account.sync_status}
+            <span
+              className={`ml-auto text-xs px-2 py-1 rounded-full font-medium ${
+                syncStatus === 'complete' || account.sync_status === 'complete'
+                  ? 'bg-green-100 text-green-700'
+                  : syncStatus === 'syncing' || account.sync_status === 'syncing'
+                  ? 'bg-blue-100 text-blue-700'
+                  : syncStatus === 'error' || account.sync_status === 'error'
+                  ? 'bg-red-100 text-red-700'
+                  : syncStatus === 'partial' || account.sync_status === 'partial'
+                  ? 'bg-amber-100 text-amber-700'
+                  : 'bg-gray-100 text-gray-600'
+              }`}
+            >
+              {syncStatus ?? account.sync_status}
             </span>
           </div>
 
-          <div className="text-sm text-gray-500 border-t border-gray-100 pt-4">
-            Last synced: {lastSynced}
+          <div className="text-sm text-gray-500 border-t border-gray-100 pt-4 flex items-center justify-between">
+            <span>Last synced: {lastSynced}</span>
+            <button
+              onClick={invokeSync}
+              disabled={isSyncing}
+              className="inline-flex items-center gap-2 text-sm text-brand-600 hover:text-brand-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSyncing ? (
+                <>
+                  <span className="w-3 h-3 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+                  Syncing…
+                </>
+              ) : (
+                'Sync now'
+              )}
+            </button>
           </div>
 
           {tokenWarning && (
@@ -78,7 +142,7 @@ export default function ConnectPage() {
             </div>
           )}
 
-          {account.sync_error && (
+          {account.sync_error && syncStatus !== 'syncing' && (
             <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
               Sync error: {account.sync_error}
             </div>
