@@ -1,4 +1,16 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(find *)",
+      "Bash(ls *)",
+      "Bash(grep *)",
+      "Bash(cat *)",
+      "Bash(echo *)",
+      "Bash(pwd)",
+      "Bash(git status)",
+      "Bash(git log *)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
