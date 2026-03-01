@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { formatDistanceToNow } from 'date-fns'
+import { toast } from 'sonner'
 import { useInstagramAccount } from '@/hooks/useInstagramAccount'
 import { useSyncStatus } from '@/hooks/useSyncStatus'
 import SyncStatusBanner from '@/components/SyncStatusBanner'
@@ -41,7 +42,6 @@ export default function ConnectPage() {
   const { account, loading, refetch } = useInstagramAccount()
   const { syncStatus } = useSyncStatus()
   const [syncing, setSyncing] = useState(false)
-  const [syncInvokeError, setSyncInvokeError] = useState<string | null>(null)
   const [syncPeriod, setSyncPeriodState] = useState<SyncPeriodDays>(readStoredPeriod)
 
   const setSyncPeriod = (days: SyncPeriodDays) => {
@@ -77,7 +77,6 @@ export default function ConnectPage() {
     // Block while an active (non-stale) sync is running
     if (syncStatus === 'syncing' && !isStaleSyncing) return
     setSyncing(true)
-    setSyncInvokeError(null)
     try {
       const { data: syncResult, error } = await supabaseClient.functions.invoke<{
         success: boolean
@@ -101,10 +100,8 @@ export default function ConnectPage() {
         } catch {
           detail = error.message ?? 'Sync request failed'
         }
-        setSyncInvokeError(detail)
+        toast.error(detail)
       } else {
-        // Log sync result to browser console for diagnostics
-        console.log('[instagram-sync] result:', syncResult)
         if (syncResult?.insightErrors && syncResult.insightErrors > 0) {
           console.warn(
             `[instagram-sync] ${syncResult.insightErrors} insight error(s). First: ${syncResult.firstInsightError}`
@@ -114,7 +111,7 @@ export default function ConnectPage() {
         refetch()
       }
     } catch (err) {
-      setSyncInvokeError(err instanceof Error ? err.message : 'Sync request failed')
+      toast.error(err instanceof Error ? err.message : 'Sync request failed')
     } finally {
       setSyncing(false)
     }
@@ -162,12 +159,6 @@ export default function ConnectPage() {
           </div>
         ) : (
           <SyncStatusBanner onRetry={invokeSync} className="mb-4" />
-        )}
-
-        {syncInvokeError && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-            {syncInvokeError}
-          </div>
         )}
 
         <div className="bg-white rounded-xl border border-gray-200 p-6">

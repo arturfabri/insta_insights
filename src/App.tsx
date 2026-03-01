@@ -1,8 +1,10 @@
 import { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
+import { Toaster } from 'sonner'
 import { AuthProvider, useAuth } from '@/context/AuthContext'
 import { GoalProvider } from '@/context/GoalContext'
 import AppShell from '@/components/Layout/AppShell'
+import ErrorBoundary from '@/components/ErrorBoundary'
 import type { ReactNode } from 'react'
 
 const LoginPage = lazy(() => import('@/pages/LoginPage'))
@@ -19,7 +21,11 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+        <div
+          className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin"
+          role="status"
+          aria-label="Loading"
+        />
       </div>
     )
   }
@@ -33,7 +39,11 @@ function AppRoutes() {
     <Suspense
       fallback={
         <div className="min-h-screen flex items-center justify-center">
-          <div className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+          <div
+            className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin"
+            role="status"
+            aria-label="Loading"
+          />
         </div>
       }
     >
@@ -65,10 +75,13 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <GoalProvider>
-        <AppRoutes />
-      </GoalProvider>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <GoalProvider>
+          <AppRoutes />
+          <Toaster position="bottom-right" richColors closeButton />
+        </GoalProvider>
+      </AuthProvider>
+    </ErrorBoundary>
   )
 }
