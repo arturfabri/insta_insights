@@ -30,7 +30,7 @@ function buildOAuthUrl(): string {
   const params = new URLSearchParams({
     client_id: META_APP_ID,
     redirect_uri: `${window.location.origin}/oauth/callback`,
-    scope: 'instagram_business_basic,instagram_business_manage_insights',
+    scope: 'instagram_basic,instagram_manage_insights',
     response_type: 'code',
     enable_fb_login: '0',
   })
