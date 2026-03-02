@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.19.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Build
+        run: npm run build
+
+  changes:
+    name: Detect Security-Relevant Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      security: ${{ steps.filter.outputs.security }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Paths filter
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            security:
+              - 'supabase/**'
+              - 'src/hooks/**'
+              - 'src/lib/**'
+              - 'src/context/**'
+              - 'src/types/**'
+              - 'scripts/**'
+
+  security:
+    name: Security Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [quality, changes]
+    if: needs.changes.outputs.security == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.19.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run security gate
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          SECURITY_TEST_OWNER_EMAIL: ${{ secrets.SECURITY_TEST_OWNER_EMAIL }}
+          SECURITY_TEST_OWNER_PASSWORD: ${{ secrets.SECURITY_TEST_OWNER_PASSWORD }}
+          SECURITY_TEST_OTHER_EMAIL: ${{ secrets.SECURITY_TEST_OTHER_EMAIL }}
+          SECURITY_TEST_OTHER_PASSWORD: ${{ secrets.SECURITY_TEST_OTHER_PASSWORD }}
+          SECURITY_TEST_ALLOWED_PROJECT_REF: ${{ secrets.SECURITY_TEST_ALLOWED_PROJECT_REF }}
+        run: npm run test:all:security

@@ -198,10 +198,39 @@ npm run dev
 ### 4) Run quality checks
 
 ```bash
+npm run typecheck
+npm run test:unit
 npm run lint
-npm test
 npm run build
 ```
+
+### 5) Run full quality gate
+
+```bash
+npm run test:all
+```
+
+### 6) Run security gate (RLS/RPC/policy checks)
+
+```bash
+npm run test:all:security
+```
+
+Security gate env vars for live smoke:
+
+```bash
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+SECURITY_TEST_OWNER_EMAIL=
+SECURITY_TEST_OWNER_PASSWORD=
+SECURITY_TEST_OTHER_EMAIL=
+SECURITY_TEST_OTHER_PASSWORD=
+SECURITY_TEST_ALLOWED_PROJECT_REF= # optional, recommended in CI
+```
+
+Notes:
+- local runs skip live smoke if `SECURITY_TEST_*` vars are missing.
+- CI should always provide these secrets so the smoke test runs.
 
 ## Supabase Setup and Migrations
 
@@ -233,7 +262,9 @@ Tests currently cover:
 Run:
 
 ```bash
-npm test
+npm run test:unit
+npm run test:all
+npm run test:all:security
 npm run test:watch
 npm run test:ui
 ```

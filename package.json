@@ -12,7 +12,9 @@
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:all": "npm run typecheck && npm run test:unit",
-    "test:all:security": "npm run test:all",
+    "test:security:policy": "vitest run src/security/policy-contracts.test.ts",
+    "test:security:smoke": "node scripts/security/rls-smoke.mjs",
+    "test:all:security": "npm run test:all && npm run test:security:policy && npm run test:security:smoke",
     "test:watch": "vitest",
     "test:ui": "vitest --ui"
   },
@@ -27,7 +29,8 @@
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.13.1",
     "sonner": "^2.0.7",
-    "tailwindcss": "^4.2.1"
+    "tailwindcss": "^4.2.1",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

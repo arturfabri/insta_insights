@@ -1,6 +1,12 @@
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders, handleCors } from '../_shared/cors.ts'
 import { encryptToken } from '../_shared/crypto.ts'
+import { sanitizeProviderError } from '../_shared/provider-error.ts'
+import {
+  isMissingColumnError,
+  isMissingRelationError,
+  isNotNullViolationForColumn,
+} from '../_shared/token-store.ts'
 
 const META_APP_ID = Deno.env.get('META_APP_ID')!
 const META_APP_SECRET = Deno.env.get('META_APP_SECRET')!
@@ -60,10 +66,11 @@ Deno.serve(async (req: Request) => {
     })
 
     const shortLivedBody = await shortLivedRes.text()
-    console.log('Step1 status:', shortLivedRes.status, 'body:', shortLivedBody)
 
     if (!shortLivedRes.ok) {
-      return fail(`Step1 (code→short token): ${shortLivedBody}`)
+      const safeError = sanitizeProviderError(shortLivedRes.status, shortLivedBody)
+      console.error('Step1 (code→short token) failed:', safeError)
+      return fail(`Step1 (code→short token): ${safeError}`)
     }
 
     const { access_token: shortLivedToken } = JSON.parse(shortLivedBody) as { access_token: string }
@@ -76,10 +83,11 @@ Deno.serve(async (req: Request) => {
 
     const longLivedRes = await fetch(longLivedUrl.toString())
     const longLivedBody = await longLivedRes.text()
-    console.log('Step2 status:', longLivedRes.status, 'body:', longLivedBody)
 
     if (!longLivedRes.ok) {
-      return fail(`Step2 (short→long token): ${longLivedBody}`)
+      const safeError = sanitizeProviderError(longLivedRes.status, longLivedBody)
+      console.error('Step2 (short→long token) failed:', safeError)
+      return fail(`Step2 (short→long token): ${safeError}`)
     }
 
     const { access_token: longLivedToken, expires_in } = JSON.parse(longLivedBody) as {
@@ -94,10 +102,11 @@ Deno.serve(async (req: Request) => {
 
     const meRes = await fetch(meUrl.toString())
     const meBody = await meRes.text()
-    console.log('Step3 status:', meRes.status, 'body:', meBody)
 
     if (!meRes.ok) {
-      return fail(`Step3 (/me): ${meBody}`)
+      const safeError = sanitizeProviderError(meRes.status, meBody)
+      console.error('Step3 (/me) failed:', safeError)
+      return fail(`Step3 (/me): ${safeError}`)
     }
 
     const meData = JSON.parse(meBody) as { id: string; username?: string; name?: string }
@@ -112,25 +121,82 @@ Deno.serve(async (req: Request) => {
       Date.now() + (expires_in - 86400) * 1000
     ).toISOString()
 
-    // Step 5: Upsert into instagram_accounts
-    const { error: upsertError } = await supabase
+    const accountPayload = {
+      user_id: user.id,
+      instagram_user_id: instagramUserId,
+      username,
+      token_expires_at: tokenExpiresAt,
+      sync_status: 'pending' as const,
+      sync_error: null,
+    }
+
+    // Primary write path (new schema): account metadata without token column.
+    // Compatibility fallback is applied below if a legacy NOT NULL token column
+    // still exists in the deployed DB.
+    let { data: accountRow, error: upsertError } = await supabase
       .from('instagram_accounts')
+      .upsert(accountPayload, { onConflict: 'user_id,instagram_user_id' })
+      .select('id, user_id')
+      .single()
+
+    const needsLegacyAccountWrite = isNotNullViolationForColumn(upsertError, 'access_token_enc')
+    if (needsLegacyAccountWrite) {
+      console.warn('Legacy schema detected (access_token_enc NOT NULL); retrying account upsert with token column')
+      const retry = await supabase
+        .from('instagram_accounts')
+        .upsert(
+          {
+            ...accountPayload,
+            access_token_enc: encryptedToken,
+          },
+          { onConflict: 'user_id,instagram_user_id' },
+        )
+        .select('id, user_id')
+        .single()
+      accountRow = retry.data
+      upsertError = retry.error
+    }
+
+    if (upsertError || !accountRow) {
+      console.error('DB upsert error:', upsertError)
+      return fail(`Step5 (DB upsert): ${upsertError?.message ?? 'No account row returned'}`)
+    }
+
+    const { error: tokenError } = await supabase
+      .from('instagram_account_tokens')
       .upsert(
         {
-          user_id: user.id,
-          instagram_user_id: instagramUserId,
-          username,
+          account_id: accountRow.id,
+          user_id: accountRow.user_id,
           access_token_enc: encryptedToken,
-          token_expires_at: tokenExpiresAt,
-          sync_status: 'pending',
-          sync_error: null,
         },
-        { onConflict: 'user_id,instagram_user_id' }
+        { onConflict: 'account_id' },
       )
 
-    if (upsertError) {
-      console.error('DB upsert error:', upsertError)
-      return fail(`Step5 (DB upsert): ${upsertError.message}`)
+    if (tokenError) {
+      if (isMissingRelationError(tokenError)) {
+        // Legacy schema rollout: token table does not exist yet.
+        const { error: legacyUpdateError } = await supabase
+          .from('instagram_accounts')
+          .update({ access_token_enc: encryptedToken })
+          .eq('id', accountRow.id)
+          .eq('user_id', accountRow.user_id)
+
+        if (legacyUpdateError) {
+          if (isMissingColumnError(legacyUpdateError)) {
+            console.error(
+              'Token persistence failed: missing token table and missing legacy token column',
+            )
+            return fail('Step5 (token persistence): no available token storage path')
+          }
+
+          console.error('Legacy token fallback update failed:', legacyUpdateError)
+          return fail(`Step5 (token fallback): ${legacyUpdateError.message}`)
+        }
+      } else {
+        console.error('Token table upsert error:', tokenError)
+        return fail(`Step5 (token upsert): ${tokenError.message}`)
+      }
     }
 
     return ok({ success: true, username, instagramUserId })

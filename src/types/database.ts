@@ -11,7 +11,6 @@ export interface InstagramAccount {
   user_id: string
   instagram_user_id: string
   username: string
-  access_token_enc: string // Never expose to UI — server-side only
   token_expires_at: string
   last_synced_at: string | null
   sync_status: SyncStatus

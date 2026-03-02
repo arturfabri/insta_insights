@@ -36,7 +36,9 @@ export function useInstagramAccount(): UseInstagramAccountResult {
 
       const { data, error: dbError } = await supabaseClient
         .from('instagram_accounts')
-        .select('*')
+        .select(
+          'id, user_id, instagram_user_id, username, token_expires_at, last_synced_at, sync_status, sync_error, created_at, updated_at',
+        )
         .eq('user_id', userId)
         .maybeSingle()
 

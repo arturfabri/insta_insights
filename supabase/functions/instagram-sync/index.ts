@@ -2,12 +2,16 @@ import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders, handleCors } from '../_shared/cors.ts'
 import { decryptToken } from '../_shared/crypto.ts'
 import { withRetry, RateLimitError } from '../_shared/retry.ts'
+import { resolveCallerAuth } from '../_shared/caller-auth.ts'
+import { mapInstagramInsightsToDb } from '../_shared/instagram-insights-mapper.ts'
+import { isMissingRelationError, readLegacyTokenFromAccountRow } from '../_shared/token-store.ts'
 
 // ─── Environment ────────────────────────────────────────────────────────────
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const TOKEN_ENCRYPTION_KEY = Deno.env.get('TOKEN_ENCRYPTION_KEY')!
+const CRON_SECRET = Deno.env.get('CRON_SECRET')
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -48,27 +52,12 @@ interface IGMediaPage {
   }
 }
 
-interface IGInsightMetric {
-  name: string
-  period: string
-  values: Array<{ value: number; end_time?: string }>
-  title: string
-  description: string
-  id: string
-}
-
 interface IGInsightsResponse {
-  data: IGInsightMetric[]
+  data: Array<{
+    name: string
+    values: Array<{ value: number; end_time?: string }>
+  }>
   error?: { message: string; type: string; code: number }
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Extract a single numeric metric value from the insights data array */
-function extractMetric(data: IGInsightMetric[], name: string): number | null {
-  const metric = data.find((m) => m.name === name)
-  if (!metric) return null
-  return metric.values?.[0]?.value ?? null
 }
 
 /** Return the comma-separated insight metric names for the given media type.
@@ -98,32 +87,24 @@ Deno.serve(async (req: Request) => {
   if (corsResponse) return corsResponse
 
   try {
-    // ── 1. Verify JWT ────────────────────────────────────────────────────────
-    const authHeader = req.headers.get('Authorization')
-    if (!authHeader) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
-
+    // ── 1. Create client + parse body ───────────────────────────────────────
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    const { data: { user }, error: authError } = await supabase.auth.getUser(
-      authHeader.replace('Bearer ', ''),
-    )
-    if (authError || !user) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
-    }
-
-    // ── 2. Parse body ────────────────────────────────────────────────────────
     const body = await req.json().catch(() => ({})) as {
       accountId?: string
       syncType?: 'initial' | 'manual' | 'cron'
       syncPeriodDays?: number
     }
+
+    // ── 2. Verify caller (user JWT or cron secret) ──────────────────────────
+    const callerResult = await resolveCallerAuth(req, supabase, CRON_SECRET)
+    if (!callerResult.success) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    const caller = callerResult.caller
 
     // Validate and default the sync period
     const periodDays: SyncPeriodDays =
@@ -132,12 +113,19 @@ Deno.serve(async (req: Request) => {
         : 90
 
     // ── 3. Fetch account ─────────────────────────────────────────────────────
-    let accountQuery = supabase
-      .from('instagram_accounts')
-      .select('*')
-      .eq('user_id', user.id)
-
-    if (body.accountId) {
+    let accountQuery = supabase.from('instagram_accounts').select('*')
+    if (caller.kind === 'user') {
+      accountQuery = accountQuery.eq('user_id', caller.userId)
+      if (body.accountId) {
+        accountQuery = accountQuery.eq('id', body.accountId)
+      }
+    } else {
+      if (!body.accountId) {
+        return new Response(JSON.stringify({ error: 'accountId is required for cron sync' }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        })
+      }
       accountQuery = accountQuery.eq('id', body.accountId)
     }
 
@@ -152,6 +140,8 @@ Deno.serve(async (req: Request) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })
     }
+
+    const accountUserId = account.user_id
 
     // ── 4. Concurrency guard ─────────────────────────────────────────────────
     // Allow override when the lock is stale (previous run timed out without
@@ -175,10 +165,38 @@ Deno.serve(async (req: Request) => {
       )
     }
 
-    // ── 5. Decrypt access token ──────────────────────────────────────────────
+    // ── 5. Fetch + decrypt access token ─────────────────────────────────────
+    const { data: tokenRow, error: tokenError } = await supabase
+      .from('instagram_account_tokens')
+      .select('access_token_enc')
+      .eq('account_id', account.id)
+      .eq('user_id', accountUserId)
+      .maybeSingle()
+
+    let encryptedToken = tokenRow?.access_token_enc ?? null
+    if (!encryptedToken) {
+      encryptedToken = readLegacyTokenFromAccountRow(account)
+      if (encryptedToken) {
+        if (tokenError && isMissingRelationError(tokenError)) {
+          console.warn('Token table missing; using legacy account token column')
+        } else if (!tokenRow) {
+          console.warn(`Token row missing for account ${account.id}; using legacy account token column`)
+        }
+      }
+    }
+
+    if (!encryptedToken) {
+      const details = tokenError?.message ?? 'Token row missing and legacy token unavailable'
+      console.error(`Token lookup failed for account ${account.id}: ${details}`)
+      return new Response(JSON.stringify({ error: 'Access token record not found', details }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
     let accessToken: string
     try {
-      accessToken = await decryptToken(account.access_token_enc, TOKEN_ENCRYPTION_KEY)
+      accessToken = await decryptToken(encryptedToken, TOKEN_ENCRYPTION_KEY)
     } catch {
       return new Response(JSON.stringify({ error: 'Failed to decrypt access token' }), {
         status: 500,
@@ -197,7 +215,7 @@ Deno.serve(async (req: Request) => {
       .from('sync_logs')
       .insert({
         account_id: account.id,
-        user_id: user.id,
+        user_id: accountUserId,
         sync_type: body.syncType ?? 'manual',
         status: 'started',
       })
@@ -250,7 +268,7 @@ Deno.serve(async (req: Request) => {
             .upsert(
               {
                 account_id: account.id,
-                user_id: user.id,
+                user_id: accountUserId,
                 media_id: item.id,
                 media_type: item.media_type,
                 is_reel: isReel,
@@ -303,57 +321,20 @@ Deno.serve(async (req: Request) => {
             }
 
             const insightsData = insightsBody.data ?? []
-            const reach = extractMetric(insightsData, 'reach') ?? 0
-            // `views` is the v22 universal content-view metric (replaces impressions /
-            // plays / video_views). Map it to the appropriate DB column by media type.
-            const views = extractMetric(insightsData, 'views') ?? 0
-            const saves = extractMetric(insightsData, 'saved') ?? 0
-            const shares = extractMetric(insightsData, 'shares') ?? 0
-            const comments = extractMetric(insightsData, 'comments') ?? 0
-            const likes = item.like_count ?? 0
-
-            // Map views → DB columns; keep deprecated columns at 0 / null
-            let impressions = 0
-            let plays: number | null = null
-            let videoViews: number | null = null
-            let avgWatchTimeSec: number | null = null
-
-            if (isReel) {
-              plays = views  // Reel view count → plays column
-              videoViews = extractMetric(insightsData, 'ig_reels_video_view_total_time')
-              const rawAvg = extractMetric(insightsData, 'ig_reels_avg_watch_time')
-              // API returns milliseconds — convert to seconds
-              avgWatchTimeSec = rawAvg !== null ? rawAvg / 1000 : null
-            } else if (item.media_type === 'VIDEO') {
-              videoViews = views  // non-Reel video view count → video_views column
-            } else {
-              impressions = views  // IMAGE / CAROUSEL view count → impressions column
-            }
-
-            const engagementRate =
-              reach > 0
-                ? (likes + comments + shares + saves) / reach
-                : null
+            const mappedInsights = mapInstagramInsightsToDb({
+              insightsData,
+              mediaType: item.media_type,
+              isReel,
+              likeCount: item.like_count ?? 0,
+            })
 
             const { error: upsertErr } = await supabase
               .from('instagram_media_insights')
               .upsert(
                 {
                   media_id_fk: mediaRow.id,
-                  user_id: user.id,
-                  reach,
-                  impressions,
-                  plays,
-                  video_views: videoViews,
-                  avg_watch_time_sec: avgWatchTimeSec,
-                  total_watch_time_ms: null, // not available in current API version
-                  likes,
-                  comments,
-                  shares,
-                  saves,
-                  profile_visits: 0,
-                  follows: 0,
-                  engagement_rate: engagementRate,
+                  user_id: accountUserId,
+                  ...mappedInsights,
                   synced_at: new Date().toISOString(),
                 },
                 { onConflict: 'media_id_fk' },

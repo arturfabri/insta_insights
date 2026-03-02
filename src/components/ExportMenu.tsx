@@ -2,7 +2,7 @@
  * ExportMenu — dropdown to export content briefs as Markdown, PDF, or clipboard.
  */
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { toast } from 'sonner'
 import { downloadMarkdown, copyToClipboard } from '@/lib/export/markdownExporter'
 import { exportBriefsToPdf } from '@/lib/export/pdfExporter'
@@ -18,34 +18,63 @@ export default function ExportMenu({ briefs, goal, disabled = false }: ExportMen
   const [open, setOpen] = useState(false)
   const [pdfState, setPdfState] = useState<'idle' | 'exporting'>('idle')
   const menuRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const firstActionRef = useRef<HTMLButtonElement>(null)
+
+  const closeMenu = useCallback((restoreFocus = false) => {
+    setOpen(false)
+    if (restoreFocus) {
+      requestAnimationFrame(() => {
+        triggerRef.current?.focus()
+      })
+    }
+  }, [])
 
   // Close on outside click
   useEffect(() => {
     if (!open) return
     const handler = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setOpen(false)
+        closeMenu()
       }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
-  }, [open])
+  }, [open, closeMenu])
+
+  useEffect(() => {
+    if (!open) return
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeMenu(true)
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown)
+    requestAnimationFrame(() => {
+      firstActionRef.current?.focus()
+    })
+
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [open, closeMenu])
 
   const handleMarkdown = () => {
     downloadMarkdown(briefs, goal)
     toast.success('Markdown downloaded')
-    setOpen(false)
+    closeMenu()
   }
 
   const handleCopy = async () => {
     await copyToClipboard(briefs, goal)
     toast.success('Copied to clipboard!')
-    setOpen(false)
+    closeMenu()
   }
 
   const handlePdf = async () => {
     setPdfState('exporting')
-    setOpen(false)
+    closeMenu()
     try {
       await exportBriefsToPdf(goal)
       toast.success('PDF exported')
@@ -59,11 +88,13 @@ export default function ExportMenu({ briefs, goal, disabled = false }: ExportMen
   return (
     <div className="relative" ref={menuRef}>
       <button
-        onClick={() => setOpen(o => !o)}
+        ref={triggerRef}
+        onClick={() => setOpen((o) => !o)}
         disabled={disabled || pdfState === 'exporting'}
         aria-label="Export content briefs"
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
+        aria-controls="export-options-popover"
         className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {pdfState === 'exporting' ? (
@@ -85,12 +116,13 @@ export default function ExportMenu({ briefs, goal, disabled = false }: ExportMen
 
       {open && (
         <div
-          role="menu"
+          id="export-options-popover"
+          role="dialog"
           aria-label="Export options"
           className="absolute right-0 top-full mt-1 w-52 bg-white border border-gray-200 rounded-xl shadow-lg z-10 overflow-hidden"
         >
           <button
-            role="menuitem"
+            ref={firstActionRef}
             onClick={handleMarkdown}
             className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 transition-colors text-left"
           >
@@ -101,10 +133,9 @@ export default function ExportMenu({ briefs, goal, disabled = false }: ExportMen
             </div>
           </button>
 
-          <div className="border-t border-gray-100" role="separator" />
+          <div className="border-t border-gray-100" />
 
           <button
-            role="menuitem"
             onClick={handleCopy}
             className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 transition-colors text-left"
           >
@@ -115,10 +146,9 @@ export default function ExportMenu({ briefs, goal, disabled = false }: ExportMen
             </div>
           </button>
 
-          <div className="border-t border-gray-100" role="separator" />
+          <div className="border-t border-gray-100" />
 
           <button
-            role="menuitem"
             onClick={handlePdf}
             className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 hover:bg-gray-50 transition-colors text-left"
           >

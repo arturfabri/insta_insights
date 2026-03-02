@@ -7,6 +7,7 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders, handleCors } from '../_shared/cors.ts'
+import { parseBriefRequest } from '../_shared/brief-request.ts'
 
 const SUPABASE_URL             = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -14,8 +15,6 @@ const ANTHROPIC_API_KEY        = Deno.env.get('ANTHROPIC_API_KEY')!
 
 const MODEL          = 'claude-haiku-4-5-20251001'
 const MAX_PER_DAY    = 10
-const VALID_COUNTS   = [5, 10, 20] as const
-type BriefCount = (typeof VALID_COUNTS)[number]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -58,13 +57,24 @@ Deno.serve(async (req: Request) => {
       accountId?: string
     }
 
-    const { goal, patternSummary, topPostSummaries = [], accountId } = body
-    if (!goal || (goal !== 'growth' && goal !== 'leads')) {
-      return fail('goal must be "growth" or "leads"')
+    const parsedRequest = parseBriefRequest(body)
+    if (!parsedRequest.ok) {
+      return fail(parsedRequest.error)
     }
-    const count: BriefCount = VALID_COUNTS.includes(body.count as BriefCount)
-      ? (body.count as BriefCount)
-      : 5
+
+    const { goal, count, accountId } = parsedRequest
+    const { patternSummary, topPostSummaries = [] } = body
+
+    const { data: account, error: accountError } = await supabase
+      .from('instagram_accounts')
+      .select('id')
+      .eq('id', accountId)
+      .eq('user_id', user.id)
+      .maybeSingle()
+
+    if (accountError || !account) {
+      return fail('accountId does not belong to the current user')
+    }
 
     // ── Rate limit ────────────────────────────────────────────────────────────
     const todayUtc = new Date()
@@ -158,7 +168,7 @@ Respond with ONLY the JSON array, nothing else.`
       .from('content_recommendations')
       .insert({
         user_id:        user.id,
-        account_id:     accountId ?? null,
+        account_id:     accountId,
         goal,
         request_params: {
           count,
@@ -172,7 +182,7 @@ Respond with ONLY the JSON array, nothing else.`
 
     if (insertError) {
       console.error('DB insert error:', insertError)
-      // Non-fatal — still return the briefs to the client
+      return fail('Failed to store generated briefs. Please try again.')
     }
 
     return ok({ success: true, briefs })

@@ -58,6 +58,7 @@ Deno.serve(async (req: Request) => {
     for (const account of accounts) {
       try {
         const { error } = await supabase.functions.invoke('instagram-sync', {
+          headers: { 'X-Cron-Secret': CRON_SECRET },
           body: { accountId: account.id, syncType: 'cron' },
         })
 

@@ -11,6 +11,11 @@
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders, handleCors } from '../_shared/cors.ts'
 import { encryptToken, decryptToken } from '../_shared/crypto.ts'
+import {
+  isMissingColumnError,
+  isMissingRelationError,
+  readLegacyTokenFromAccountRow,
+} from '../_shared/token-store.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -48,7 +53,7 @@ Deno.serve(async (req: Request) => {
     const cutoff = new Date(Date.now() + FOURTEEN_DAYS_MS).toISOString()
     const { data: accounts, error: accountsError } = await supabase
       .from('instagram_accounts')
-      .select('id, username, access_token_enc, token_expires_at')
+      .select('id, user_id, username, token_expires_at')
       .lt('token_expires_at', cutoff)
 
     if (accountsError) {
@@ -66,6 +71,29 @@ Deno.serve(async (req: Request) => {
       )
     }
 
+    const accountIds = accounts.map((a) => a.id)
+    const { data: tokenRows, error: tokenRowsError } = await supabase
+      .from('instagram_account_tokens')
+      .select('account_id, user_id, access_token_enc')
+      .in('account_id', accountIds)
+
+    if (tokenRowsError && !isMissingRelationError(tokenRowsError)) {
+      console.error('Failed to fetch token rows:', tokenRowsError)
+      return new Response(JSON.stringify({ error: 'Failed to fetch token rows' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    const tokenByAccount = new Map(
+      (tokenRows ?? []).map((row) => [row.account_id, row]),
+    )
+
+    const tokenTableMissing = isMissingRelationError(tokenRowsError)
+    if (tokenTableMissing) {
+      console.warn('Token table missing; token-refresh will use legacy account token column')
+    }
+
     const results: Array<{
       accountId: string
       username: string
@@ -75,8 +103,30 @@ Deno.serve(async (req: Request) => {
 
     for (const account of accounts) {
       try {
+        const tokenRow = tokenByAccount.get(account.id)
+        let encryptedToken = tokenRow?.access_token_enc ?? null
+
+        if (!encryptedToken || tokenRow?.user_id !== account.user_id || tokenTableMissing) {
+          const { data: legacyAccountRow, error: legacyTokenError } = await supabase
+            .from('instagram_accounts')
+            .select('access_token_enc')
+            .eq('id', account.id)
+            .eq('user_id', account.user_id)
+            .maybeSingle()
+
+          if (legacyTokenError && !isMissingColumnError(legacyTokenError)) {
+            throw new Error(`Legacy token lookup failed: ${legacyTokenError.message}`)
+          }
+
+          encryptedToken = readLegacyTokenFromAccountRow(legacyAccountRow)
+        }
+
+        if (!encryptedToken) {
+          throw new Error('Encrypted token row not found for account')
+        }
+
         // Decrypt current token
-        const currentToken = await decryptToken(account.access_token_enc, TOKEN_ENCRYPTION_KEY)
+        const currentToken = await decryptToken(encryptedToken, TOKEN_ENCRYPTION_KEY)
 
         // Call the Instagram refresh endpoint
         const refreshUrl = new URL(`${IG_API_BASE}/refresh_access_token`)
@@ -101,16 +151,42 @@ Deno.serve(async (req: Request) => {
           Date.now() + (refreshData.expires_in - ONE_DAY_SEC) * 1000,
         ).toISOString()
 
-        const { error: updateError } = await supabase
+        const { error: accountUpdateError } = await supabase
           .from('instagram_accounts')
           .update({
-            access_token_enc: newTokenEnc,
             token_expires_at: newExpiresAt,
           })
           .eq('id', account.id)
 
-        if (updateError) {
-          throw new Error(`DB update failed: ${updateError.message}`)
+        if (accountUpdateError) {
+          throw new Error(`Account update failed: ${accountUpdateError.message}`)
+        }
+
+        if (tokenTableMissing) {
+          const { error: legacyUpdateError } = await supabase
+            .from('instagram_accounts')
+            .update({
+              access_token_enc: newTokenEnc,
+            })
+            .eq('id', account.id)
+            .eq('user_id', account.user_id)
+
+          if (legacyUpdateError && !isMissingColumnError(legacyUpdateError)) {
+            throw new Error(`Legacy token update failed: ${legacyUpdateError.message}`)
+          }
+        } else {
+          const { error: tokenUpdateError } = await supabase
+            .from('instagram_account_tokens')
+            .update({
+              access_token_enc: newTokenEnc,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('account_id', account.id)
+            .eq('user_id', account.user_id)
+
+          if (tokenUpdateError) {
+            throw new Error(`Token update failed: ${tokenUpdateError.message}`)
+          }
         }
 
         console.log(`Token refreshed for @${account.username}, expires ${newExpiresAt}`)

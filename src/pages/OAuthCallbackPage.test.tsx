@@ -28,9 +28,10 @@ function renderCallback(search: string) {
 }
 
 describe('OAuthCallbackPage', () => {
-  it('shows processing state initially when code is present', () => {
+  it('shows session-expired error when code is present but no auth session exists', async () => {
     renderCallback('?code=test123')
-    expect(screen.getByText(/connecting your instagram/i)).toBeInTheDocument()
+    await screen.findByText(/connection failed/i)
+    expect(screen.getByText(/session expired/i)).toBeInTheDocument()
   })
 
   it('shows error state when error param is present', async () => {
