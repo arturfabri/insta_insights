@@ -68,6 +68,7 @@ function makeMedia(
     media_url: null,
     timestamp: new Date(2024, 0, 1, 9).toISOString(), // 9am
     duration_seconds: null,
+    media_product_type: 'FEED',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     insights: {
@@ -78,6 +79,15 @@ function makeMedia(
       impressions: 1500,
       plays: null,
       video_views: null,
+      views: null,
+      total_interactions: null,
+      profile_activity: null,
+      replies: null,
+      reposts: null,
+      reels_skip_rate: null,
+      crossposted_views: null,
+      facebook_views: null,
+      completion_rate: null,
       avg_watch_time_sec: null,
       total_watch_time_ms: null,
       likes: 100,

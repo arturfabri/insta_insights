@@ -27,12 +27,14 @@ describe('mapInstagramInsightsToDb', () => {
       mediaType: 'VIDEO',
       isReel: true,
       likeCount: 20,
+      durationSeconds: 30,
     })
 
     expect(result.plays).toBe(80)
     expect(result.video_views).toBeNull()
     expect(result.total_watch_time_ms).toBe(60000)
     expect(result.avg_watch_time_sec).toBe(15)
+    expect(result.completion_rate).toBe(0.5)
   })
 
   it('maps non-reel video views to video_views', () => {
