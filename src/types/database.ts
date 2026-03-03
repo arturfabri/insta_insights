@@ -19,6 +19,19 @@ export interface InstagramAccount {
   updated_at: string
 }
 
+export interface InstagramAccountCapabilities {
+  account_id: string
+  user_id: string
+  instagram_connected: boolean
+  facebook_connected: boolean
+  business_discovery_enabled: boolean
+  facebook_token_expires_at: string | null
+  status_reason: string
+  last_validated_at: string
+  created_at: string
+  updated_at: string
+}
+
 export interface InstagramMedia {
   id: string
   account_id: string
@@ -126,6 +139,7 @@ export interface SyncLog {
   metrics_attempted: string[]
   metrics_succeeded: string[]
   metrics_failed: string[]
+  capability_gaps: string[]
   error_message: string | null
   started_at: string
   completed_at: string | null

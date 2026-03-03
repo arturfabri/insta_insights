@@ -113,6 +113,24 @@ interface BusinessDiscoveryTargetRow {
   target_username: string
 }
 
+interface SyncScopesRequest {
+  media: boolean
+  account: boolean
+  businessDiscovery: boolean
+}
+
+function normalizeSyncScopes(syncScopes: {
+  media?: boolean
+  account?: boolean
+  businessDiscovery?: boolean
+} | undefined): SyncScopesRequest {
+  return {
+    media: syncScopes?.media ?? true,
+    account: syncScopes?.account ?? true,
+    businessDiscovery: syncScopes?.businessDiscovery ?? true,
+  }
+}
+
 function metricKeys(
   scope: 'media' | 'account' | 'business_discovery_account' | 'business_discovery_media',
   metricType: 'snapshot' | 'total_value' | 'time_series',
@@ -189,6 +207,11 @@ Deno.serve(async (req: Request) => {
       accountId?: string
       syncType?: 'initial' | 'manual' | 'cron'
       syncPeriodDays?: number
+      syncScopes?: {
+        media?: boolean
+        account?: boolean
+        businessDiscovery?: boolean
+      }
     }
 
     // ── 2. Verify caller (user JWT or cron secret) ──────────────────────────
@@ -207,6 +230,7 @@ Deno.serve(async (req: Request) => {
       VALID_PERIODS.includes(body.syncPeriodDays as SyncPeriodDays)
         ? (body.syncPeriodDays as SyncPeriodDays)
         : 90
+    const requestedScopes = normalizeSyncScopes(body.syncScopes)
 
     // ── 3. Fetch account ─────────────────────────────────────────────────────
     let accountQuery = supabase.from('instagram_accounts').select('*')
@@ -323,6 +347,7 @@ Deno.serve(async (req: Request) => {
         metrics_requested_count: 0,
         metrics_succeeded_count: 0,
         metrics_failed_count: 0,
+        capability_gaps: [],
       })
       .select('id')
       .single()
@@ -344,6 +369,8 @@ Deno.serve(async (req: Request) => {
     const attemptedMetricSet = new Set<string>()
     const succeededMetricSet = new Set<string>()
     const failedMetricSet = new Set<string>()
+    const capabilityGapSet = new Set<string>()
+    let canRunBusinessDiscovery = requestedScopes.businessDiscovery
     const cutoff = cutoffDate(periodDays)
     console.log(`Sync period: ${periodDays} days (cutoff: ${cutoff.toISOString()})`)
 
@@ -357,6 +384,91 @@ Deno.serve(async (req: Request) => {
 
     function markFailed(keys: string[]) {
       keys.forEach((key) => failedMetricSet.add(key))
+    }
+
+    function markCapabilityGap(gap: string) {
+      capabilityGapSet.add(gap)
+    }
+
+    if (requestedScopes.businessDiscovery) {
+      const { data: capabilityRow, error: capabilityError } = await supabase
+        .from('instagram_account_capabilities')
+        .select('facebook_connected,business_discovery_enabled,facebook_token_expires_at')
+        .eq('account_id', account.id)
+        .eq('user_id', accountUserId)
+        .maybeSingle()
+
+      if (capabilityError && !isMissingRelationError(capabilityError)) {
+        console.error(`Capability lookup failed for account ${account.id}: ${capabilityError.message}`)
+        canRunBusinessDiscovery = false
+        markCapabilityGap('business_discovery:capability_lookup_failed')
+      } else if (capabilityRow) {
+        const expiresAtMs = capabilityRow.facebook_token_expires_at
+          ? new Date(capabilityRow.facebook_token_expires_at).getTime()
+          : null
+        const isExpired = expiresAtMs !== null && expiresAtMs <= Date.now()
+
+        canRunBusinessDiscovery = capabilityRow.facebook_connected &&
+          capabilityRow.business_discovery_enabled &&
+          !isExpired
+
+        if (!canRunBusinessDiscovery) {
+          const reason = isExpired
+            ? 'business_discovery:facebook_token_expired'
+            : 'business_discovery:facebook_login_missing'
+          markCapabilityGap(reason)
+        }
+      } else {
+        const { data: fbTokenFallback, error: fbTokenFallbackError } = await supabase
+          .from('instagram_account_fb_tokens')
+          .select('access_token_enc,token_expires_at')
+          .eq('account_id', account.id)
+          .eq('user_id', accountUserId)
+          .maybeSingle()
+
+        if (fbTokenFallbackError) {
+          console.error(`FB token fallback lookup failed for account ${account.id}: ${fbTokenFallbackError.message}`)
+        }
+
+        const expiresAtMs = fbTokenFallback?.token_expires_at
+          ? new Date(fbTokenFallback.token_expires_at).getTime()
+          : null
+        const isExpired = expiresAtMs !== null && expiresAtMs <= Date.now()
+
+        canRunBusinessDiscovery = Boolean(fbTokenFallback?.access_token_enc) && !isExpired
+        if (!canRunBusinessDiscovery) {
+          const reason = isExpired
+            ? 'business_discovery:facebook_token_expired'
+            : 'business_discovery:facebook_login_missing'
+          markCapabilityGap(reason)
+        }
+
+        const nowIso = new Date().toISOString()
+        const { error: capabilityUpsertError } = await supabase
+          .from('instagram_account_capabilities')
+          .upsert(
+            {
+              account_id: account.id,
+              user_id: accountUserId,
+              instagram_connected: true,
+              facebook_connected: canRunBusinessDiscovery,
+              business_discovery_enabled: canRunBusinessDiscovery,
+              facebook_token_expires_at: fbTokenFallback?.token_expires_at ?? null,
+              status_reason: canRunBusinessDiscovery
+                ? 'meta_upgraded'
+                : isExpired
+                ? 'facebook_token_expired'
+                : 'facebook_login_missing',
+              last_validated_at: nowIso,
+              updated_at: nowIso,
+            },
+            { onConflict: 'account_id' },
+          )
+
+        if (capabilityUpsertError && !isMissingRelationError(capabilityUpsertError)) {
+          console.warn(`Capability fallback upsert failed for ${account.id}: ${capabilityUpsertError.message}`)
+        }
+      }
     }
 
     async function upsertMetricFacts(rows: MetricFactRow[]): Promise<{ error: string | null }> {
@@ -474,7 +586,8 @@ Deno.serve(async (req: Request) => {
     }
 
     try {
-      while (fetchMore && postsProcessed < MAX_POSTS && !isRateLimited) {
+      if (requestedScopes.media) {
+        while (fetchMore && postsProcessed < MAX_POSTS && !isRateLimited) {
         // Build the /me/media URL
         const mediaUrl = new URL(`${IG_API_BASE}/me/media`)
         mediaUrl.searchParams.set('fields', MEDIA_FIELDS)
@@ -665,15 +778,16 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        if (isRateLimited) break
+          if (isRateLimited) break
 
-        // Advance cursor
-        cursor = mediaPage.paging?.cursors?.after
-        if (!mediaPage.paging?.next || !cursor) fetchMore = false
+          // Advance cursor
+          cursor = mediaPage.paging?.cursors?.after
+          if (!mediaPage.paging?.next || !cursor) fetchMore = false
+        }
       }
 
       // ── 10. Fetch account-level insights and persist daily facts ──────────
-      if (!isRateLimited) {
+      if (!isRateLimited && requestedScopes.account) {
         for (const request of accountInsightsRequests()) {
           const accountMetricKeys = metricKeys('account', request.metricType, request.metrics)
           markAttempted(accountMetricKeys)
@@ -775,8 +889,15 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      if (!isRateLimited && requestedScopes.businessDiscovery && !canRunBusinessDiscovery) {
+        const capabilityMessage =
+          'Business discovery skipped: Meta (Facebook Login) connection is missing or expired'
+        console.warn(capabilityMessage)
+        if (!firstBusinessDiscoveryError) firstBusinessDiscoveryError = capabilityMessage
+      }
+
       // ── 11. Sync Business Discovery tracked targets (FB Login token path) ─
-      if (!isRateLimited) {
+      if (!isRateLimited && requestedScopes.businessDiscovery && canRunBusinessDiscovery) {
         const { data: bdTargets, error: bdTargetsError } = await supabase
           .from('instagram_business_discovery_targets')
           .select('id,target_username')
@@ -979,7 +1100,12 @@ Deno.serve(async (req: Request) => {
       }
 
       // ── 12. Update account status ──────────────────────────────────────────
-      const finalStatus = isRateLimited ? 'partial' : 'complete'
+      const capabilityGaps = [...capabilityGapSet].sort()
+      const isCapabilityPartial = requestedScopes.businessDiscovery &&
+        !canRunBusinessDiscovery &&
+        capabilityGaps.length > 0
+      const isPartial = isRateLimited || isCapabilityPartial
+      const finalStatus = isPartial ? 'partial' : 'complete'
       const attemptedMetrics = [...attemptedMetricSet].sort()
       const succeededMetrics = [...succeededMetricSet].sort()
       const failedMetrics = [...failedMetricSet]
@@ -992,6 +1118,8 @@ Deno.serve(async (req: Request) => {
           last_synced_at: new Date().toISOString(),
           sync_error: isRateLimited
             ? 'Rate limit reached — partial sync completed'
+            : isCapabilityPartial
+            ? 'Business discovery skipped — Meta connection required'
             : null,
         })
         .eq('id', account.id)
@@ -1001,12 +1129,18 @@ Deno.serve(async (req: Request) => {
         await supabase
           .from('sync_logs')
           .update({
-            status: isRateLimited ? 'partial' : 'complete',
+            status: isPartial ? 'partial' : 'complete',
             scope: 'all',
-            api_host: rateLimitEvents > 0 || businessDiscoveryErrors > 0 ? 'graph.instagram.com|graph.facebook.com' : 'graph.instagram.com',
+            api_host: requestedScopes.businessDiscovery
+              ? 'graph.instagram.com|graph.facebook.com'
+              : 'graph.instagram.com',
             api_version: 'v22.0',
             rate_limit_events: rateLimitEvents,
-            failure_class: isRateLimited ? 'rate_limit' : null,
+            failure_class: isRateLimited
+              ? 'rate_limit'
+              : isCapabilityPartial
+              ? 'capability_gap'
+              : null,
             posts_fetched: postsProcessed,
             posts_updated: postsUpserted,
             metrics_attempted: attemptedMetrics,
@@ -1015,6 +1149,7 @@ Deno.serve(async (req: Request) => {
             metrics_requested_count: attemptedMetrics.length,
             metrics_succeeded_count: succeededMetrics.length,
             metrics_failed_count: failedMetrics.length,
+            capability_gaps: capabilityGaps,
             completed_at: new Date().toISOString(),
           })
           .eq('id', syncLog.id)
@@ -1035,7 +1170,8 @@ Deno.serve(async (req: Request) => {
           metricsAttempted: attemptedMetrics,
           metricsSucceeded: succeededMetrics,
           metricsFailed: failedMetrics,
-          partial: isRateLimited,
+          capabilityGaps,
+          partial: isPartial,
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       )
@@ -1080,6 +1216,7 @@ Deno.serve(async (req: Request) => {
         const failedMetrics = [...failedMetricSet]
           .filter((metricKey) => !succeededMetricSet.has(metricKey))
           .sort()
+        const capabilityGaps = [...capabilityGapSet].sort()
 
         await supabase
           .from('sync_logs')
@@ -1098,6 +1235,7 @@ Deno.serve(async (req: Request) => {
             metrics_requested_count: attemptedMetrics.length,
             metrics_succeeded_count: succeededMetrics.length,
             metrics_failed_count: failedMetrics.length,
+            capability_gaps: capabilityGaps,
             error_message: errorMessage,
             completed_at: new Date().toISOString(),
           })

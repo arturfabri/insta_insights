@@ -2,6 +2,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2'
 import { corsHeaders, handleCors } from '../_shared/cors.ts'
 import { encryptToken } from '../_shared/crypto.ts'
 import { sanitizeProviderError } from '../_shared/provider-error.ts'
+import { isMissingRelationError } from '../_shared/token-store.ts'
 
 const META_APP_ID = Deno.env.get('META_APP_ID')!
 const META_APP_SECRET = Deno.env.get('META_APP_SECRET')!
@@ -118,7 +119,47 @@ Deno.serve(async (req: Request) => {
       return fail(`Failed to store Facebook token: ${tokenUpsertError.message}`)
     }
 
-    return ok({ success: true })
+    const nowIso = new Date().toISOString()
+    const isExpired =
+      tokenExpiresAt ? new Date(tokenExpiresAt).getTime() <= Date.now() : false
+    const capabilityStatusReason = isExpired ? 'facebook_token_expired' : 'meta_upgraded'
+
+    const { error: capabilityUpsertError } = await supabase
+      .from('instagram_account_capabilities')
+      .upsert(
+        {
+          account_id: accountRow.id,
+          user_id: accountRow.user_id,
+          instagram_connected: true,
+          facebook_connected: !isExpired,
+          business_discovery_enabled: !isExpired,
+          facebook_token_expires_at: tokenExpiresAt,
+          status_reason: capabilityStatusReason,
+          last_validated_at: nowIso,
+          updated_at: nowIso,
+        },
+        { onConflict: 'account_id' },
+      )
+
+    if (capabilityUpsertError && !isMissingRelationError(capabilityUpsertError)) {
+      return fail(`Failed to update capability state: ${capabilityUpsertError.message}`)
+    }
+
+    if (capabilityUpsertError && isMissingRelationError(capabilityUpsertError)) {
+      console.warn('Capability table missing; token stored without capability projection update')
+    }
+
+    return ok({
+      success: true,
+      accountId: accountRow.id,
+      capability: {
+        instagram_connected: true,
+        facebook_connected: !isExpired,
+        business_discovery_enabled: !isExpired,
+        facebook_token_expires_at: tokenExpiresAt,
+        status_reason: capabilityStatusReason,
+      },
+    })
   } catch (err) {
     return fail(`Unexpected error: ${err instanceof Error ? err.message : String(err)}`)
   }

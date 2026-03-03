@@ -9,7 +9,7 @@ interface UseSyncStatusResult {
   syncError: string | null
 }
 
-export function useSyncStatus(): UseSyncStatusResult {
+export function useSyncStatus(accountId?: string | null): UseSyncStatusResult {
   const { user } = useAuth()
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null)
@@ -24,13 +24,17 @@ export function useSyncStatus(): UseSyncStatusResult {
     let cancelled = false
 
     async function fetchStatus() {
-      const { data, error } = await supabaseClient
+      let query = supabaseClient
         .from('instagram_accounts')
         .select('sync_status, last_synced_at, sync_error')
         .eq('user_id', userId)
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .maybeSingle()
+      if (accountId) {
+        query = query.eq('id', accountId)
+      } else {
+        query = query.order('created_at', { ascending: true }).limit(1)
+      }
+
+      const { data, error } = await query.maybeSingle()
 
       if (cancelled) return
       if (error || !data) return
@@ -42,7 +46,7 @@ export function useSyncStatus(): UseSyncStatusResult {
 
     void fetchStatus()
     return () => { cancelled = true }
-  }, [userId])
+  }, [accountId, userId])
 
   // Realtime subscription — updates live as sync_status changes on the server
   useEffect(() => {
@@ -56,7 +60,7 @@ export function useSyncStatus(): UseSyncStatusResult {
           event: 'UPDATE',
           schema: 'public',
           table: 'instagram_accounts',
-          filter: `user_id=eq.${userId}`,
+          filter: accountId ? `id=eq.${accountId}` : `user_id=eq.${userId}`,
         },
         (payload) => {
           const row = payload.new as {
@@ -74,7 +78,7 @@ export function useSyncStatus(): UseSyncStatusResult {
     return () => {
       void supabaseClient.removeChannel(channel)
     }
-  }, [userId])
+  }, [accountId, userId])
 
   return { syncStatus, lastSyncedAt, syncError }
 }

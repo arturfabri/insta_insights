@@ -199,6 +199,50 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // Keep a client-safe capability projection in sync with OAuth state.
+    // Preserve existing FB-upgrade flags so reconnecting Instagram does not
+    // accidentally downgrade Business Discovery capability.
+    const nowIso = new Date().toISOString()
+    const { data: existingCapabilities, error: capabilitiesReadError } = await supabase
+      .from('instagram_account_capabilities')
+      .select(
+        'facebook_connected,business_discovery_enabled,facebook_token_expires_at,status_reason',
+      )
+      .eq('account_id', accountRow.id)
+      .eq('user_id', accountRow.user_id)
+      .maybeSingle()
+
+    if (capabilitiesReadError && !isMissingRelationError(capabilitiesReadError)) {
+      console.error('Capability state read failed:', capabilitiesReadError)
+      return fail(`Step6 (capability read): ${capabilitiesReadError.message}`)
+    }
+
+    if (!capabilitiesReadError || !isMissingRelationError(capabilitiesReadError)) {
+      const { error: capabilityUpsertError } = await supabase
+        .from('instagram_account_capabilities')
+        .upsert(
+          {
+            account_id: accountRow.id,
+            user_id: accountRow.user_id,
+            instagram_connected: true,
+            facebook_connected: existingCapabilities?.facebook_connected ?? false,
+            business_discovery_enabled: existingCapabilities?.business_discovery_enabled ?? false,
+            facebook_token_expires_at: existingCapabilities?.facebook_token_expires_at ?? null,
+            status_reason: existingCapabilities?.status_reason ?? 'instagram_only',
+            last_validated_at: nowIso,
+            updated_at: nowIso,
+          },
+          { onConflict: 'account_id' },
+        )
+
+      if (capabilityUpsertError) {
+        console.error('Capability state upsert failed:', capabilityUpsertError)
+        return fail(`Step6 (capability upsert): ${capabilityUpsertError.message}`)
+      }
+    } else {
+      console.warn('Capability table missing; skipping capability projection update')
+    }
+
     return ok({ success: true, username, instagramUserId })
   } catch (err) {
     console.error('Unexpected error:', err)

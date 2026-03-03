@@ -1,22 +1,28 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { formatDistanceToNow } from 'date-fns'
+import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
-import { useInstagramAccount } from '@/hooks/useInstagramAccount'
+import { useInstagramAccounts } from '@/hooks/useInstagramAccounts'
 import { useSyncStatus } from '@/hooks/useSyncStatus'
+import { useAccountCapabilities } from '@/hooks/useAccountCapabilities'
 import SyncStatusBanner from '@/components/SyncStatusBanner'
 import { supabaseClient } from '@/lib/supabase'
+import { buildFacebookOAuthState, deriveCapabilityBadge } from '@/lib/account-capabilities'
 
 const META_APP_ID = import.meta.env.VITE_META_APP_ID as string
 
 const SYNC_PERIODS = [
-  { days: 90,  label: '90 days' },
+  { days: 90, label: '90 days' },
   { days: 180, label: '180 days' },
   { days: 360, label: '360 days' },
 ] as const
 
 type SyncPeriodDays = 90 | 180 | 360
 
+type CapabilityBadgeLabel = 'Instagram only' | 'Meta upgraded' | 'Meta reconnect needed'
+
 const PERIOD_STORAGE_KEY = 'insta_insights_sync_period'
+const ACCOUNT_STORAGE_KEY = 'insta_insights_selected_account_id'
 /** Sync locks older than this are considered stale (Edge Function timed out) */
 const STALE_SYNC_MS = 10 * 60 * 1000 // 10 minutes
 
@@ -27,53 +33,133 @@ function readStoredPeriod(): SyncPeriodDays {
     : 90
 }
 
-function buildOAuthUrl(): string {
+function readStoredAccountId(): string | null {
+  const stored = localStorage.getItem(ACCOUNT_STORAGE_KEY)
+  return stored && stored.trim().length > 0 ? stored : null
+}
+
+function buildInstagramOAuthUrl(): string {
   const params = new URLSearchParams({
     client_id: META_APP_ID,
     redirect_uri: `${window.location.origin}/oauth/callback`,
-    scope: 'instagram_basic,instagram_manage_insights',
+    scope: 'instagram_business_basic,instagram_business_manage_insights',
     response_type: 'code',
-    enable_fb_login: '0',
   })
   return `https://www.instagram.com/oauth/authorize?${params.toString()}`
 }
 
+function buildFacebookOAuthUrl(accountId: string): string {
+  const params = new URLSearchParams({
+    client_id: META_APP_ID,
+    redirect_uri: `${window.location.origin}/oauth/facebook-callback`,
+    scope: 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement',
+    response_type: 'code',
+    state: buildFacebookOAuthState(accountId),
+  })
+  return `https://www.facebook.com/v22.0/dialog/oauth?${params.toString()}`
+}
+
+function syncStatusClasses(status: string | null): string {
+  if (status === 'complete') return 'bg-green-100 text-green-700'
+  if (status === 'syncing') return 'bg-blue-100 text-blue-700'
+  if (status === 'error') return 'bg-red-100 text-red-700'
+  if (status === 'partial') return 'bg-amber-100 text-amber-700'
+  return 'bg-gray-100 text-gray-600'
+}
+
+function capabilityBadgeLabel(status: string): CapabilityBadgeLabel {
+  if (status === 'meta_upgraded') return 'Meta upgraded'
+  if (status === 'meta_reconnect_needed') return 'Meta reconnect needed'
+  return 'Instagram only'
+}
+
+function capabilityBadgeClasses(status: string): string {
+  if (status === 'meta_upgraded') return 'bg-green-100 text-green-700 border-green-200'
+  if (status === 'meta_reconnect_needed') return 'bg-amber-100 text-amber-700 border-amber-200'
+  return 'bg-gray-100 text-gray-600 border-gray-200'
+}
+
 export default function ConnectPage() {
-  const { account, loading, refetch } = useInstagramAccount()
-  const { syncStatus } = useSyncStatus()
+  const [searchParams] = useSearchParams()
+  const { accounts, loading, refetch } = useInstagramAccounts()
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(readStoredAccountId)
   const [syncing, setSyncing] = useState(false)
   const [syncPeriod, setSyncPeriodState] = useState<SyncPeriodDays>(readStoredPeriod)
+
+  useEffect(() => {
+    const accountIdFromQuery = searchParams.get('accountId')
+    if (!accountIdFromQuery) return
+    setSelectedAccountId(accountIdFromQuery)
+  }, [searchParams])
+
+  useEffect(() => {
+    if (!accounts.length) {
+      setSelectedAccountId(null)
+      localStorage.removeItem(ACCOUNT_STORAGE_KEY)
+      return
+    }
+
+    const hasSelected = selectedAccountId && accounts.some((item) => item.id === selectedAccountId)
+    if (hasSelected) return
+
+    const fallbackId = accounts[0].id
+    setSelectedAccountId(fallbackId)
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, fallbackId)
+  }, [accounts, selectedAccountId])
+
+  const activeAccount = useMemo(
+    () => accounts.find((item) => item.id === selectedAccountId) ?? accounts[0] ?? null,
+    [accounts, selectedAccountId],
+  )
+
+  const { syncStatus } = useSyncStatus(activeAccount?.id)
+  const {
+    capabilities,
+    loading: capabilitiesLoading,
+    error: capabilitiesError,
+    refetch: refetchCapabilities,
+  } = useAccountCapabilities(activeAccount?.id)
 
   const setSyncPeriod = (days: SyncPeriodDays) => {
     localStorage.setItem(PERIOD_STORAGE_KEY, String(days))
     setSyncPeriodState(days)
   }
 
+  const onSelectAccount = (accountId: string) => {
+    setSelectedAccountId(accountId)
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, accountId)
+  }
+
   const lastSynced = useMemo(
     () =>
-      account?.last_synced_at
-        ? formatDistanceToNow(new Date(account.last_synced_at), { addSuffix: true })
+      activeAccount?.last_synced_at
+        ? formatDistanceToNow(new Date(activeAccount.last_synced_at), { addSuffix: true })
         : 'Never',
-    [account]
+    [activeAccount],
   )
 
   const tokenWarning = useMemo(() => {
-    if (!account) return false
+    if (!activeAccount) return false
     const fourteenDaysFromNow = new Date()
     fourteenDaysFromNow.setDate(fourteenDaysFromNow.getDate() + 14)
-    return new Date(account.token_expires_at) < fourteenDaysFromNow
-  }, [account])
+    return new Date(activeAccount.token_expires_at) < fourteenDaysFromNow
+  }, [activeAccount])
 
   // True when sync_status has been 'syncing' for more than 10 minutes,
   // which means the Edge Function timed out without updating the status.
   const isStaleSyncing = useMemo(() => {
-    if (syncStatus !== 'syncing' || !account) return false
-    return Date.now() - new Date(account.updated_at).getTime() > STALE_SYNC_MS
-  }, [syncStatus, account])
+    if (syncStatus !== 'syncing' || !activeAccount) return false
+    return Date.now() - new Date(activeAccount.updated_at).getTime() > STALE_SYNC_MS
+  }, [syncStatus, activeAccount])
+
+  const capabilityBadge = useMemo(
+    () => deriveCapabilityBadge(capabilities),
+    [capabilities],
+  )
 
   // Trigger a sync via the Edge Function
   const invokeSync = useCallback(async () => {
-    if (!account || syncing) return
+    if (!activeAccount || syncing) return
     // Block while an active (non-stale) sync is running
     if (syncStatus === 'syncing' && !isStaleSyncing) return
     setSyncing(true)
@@ -86,7 +172,7 @@ export default function ConnectPage() {
         firstInsightError: string | null
         partial: boolean
       }>('instagram-sync', {
-        body: { accountId: account.id, syncPeriodDays: syncPeriod },
+        body: { accountId: activeAccount.id, syncPeriodDays: syncPeriod },
       })
       if (error) {
         // error.message is always the generic Supabase wrapper text.
@@ -104,27 +190,27 @@ export default function ConnectPage() {
       } else {
         if (syncResult?.insightErrors && syncResult.insightErrors > 0) {
           console.warn(
-            `[instagram-sync] ${syncResult.insightErrors} insight error(s). First: ${syncResult.firstInsightError}`
+            `[instagram-sync] ${syncResult.insightErrors} insight error(s). First: ${syncResult.firstInsightError}`,
           )
         }
-        // Refetch account so the UI picks up the updated sync_status
         refetch()
+        refetchCapabilities()
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Sync request failed')
     } finally {
       setSyncing(false)
     }
-  }, [account, syncing, syncStatus, isStaleSyncing, syncPeriod, refetch])
+  }, [activeAccount, syncing, syncStatus, isStaleSyncing, syncPeriod, refetch, refetchCapabilities])
 
   // Auto-trigger initial sync when account is newly connected (never synced)
   useEffect(() => {
-    if (account && !account.last_synced_at && syncStatus !== 'syncing') {
+    if (activeAccount && !activeAccount.last_synced_at && syncStatus !== 'syncing') {
       void invokeSync()
     }
-  // Only run once when account first becomes available
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [account?.id])
+    // Only run once when account first becomes available.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAccount?.id])
 
   if (loading) {
     return (
@@ -134,10 +220,11 @@ export default function ConnectPage() {
     )
   }
 
-  if (account) {
+  if (activeAccount) {
     // isSyncing controls button/pill disabled state.
     // A stale sync is NOT treated as active — we want UI controls enabled.
     const isSyncing = syncing || (syncStatus === 'syncing' && !isStaleSyncing)
+    const oauthMetaUrl = buildFacebookOAuthUrl(activeAccount.id)
 
     return (
       <div className="max-w-lg mx-auto mt-16">
@@ -162,29 +249,39 @@ export default function ConnectPage() {
         )}
 
         <div className="bg-white rounded-xl border border-gray-200 p-6">
+          {accounts.length > 1 && (
+            <div className="mb-4">
+              <label htmlFor="account-select" className="block text-xs font-medium text-gray-500 mb-2">
+                Connected account
+              </label>
+              <select
+                id="account-select"
+                value={activeAccount.id}
+                onChange={(event) => onSelectAccount(event.target.value)}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:border-brand-500 focus:outline-none"
+              >
+                {accounts.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    @{item.username}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Account header */}
           <div className="flex items-center gap-3 mb-4">
             <div className="w-10 h-10 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 font-bold text-lg">
               @
             </div>
             <div>
-              <p className="font-semibold text-gray-900">@{account.username}</p>
+              <p className="font-semibold text-gray-900">@{activeAccount.username}</p>
               <p className="text-sm text-gray-500">Connected</p>
             </div>
             <span
-              className={`ml-auto text-xs px-2 py-1 rounded-full font-medium ${
-                syncStatus === 'complete' || account.sync_status === 'complete'
-                  ? 'bg-green-100 text-green-700'
-                  : syncStatus === 'syncing' || account.sync_status === 'syncing'
-                  ? 'bg-blue-100 text-blue-700'
-                  : syncStatus === 'error' || account.sync_status === 'error'
-                  ? 'bg-red-100 text-red-700'
-                  : syncStatus === 'partial' || account.sync_status === 'partial'
-                  ? 'bg-amber-100 text-amber-700'
-                  : 'bg-gray-100 text-gray-600'
-              }`}
+              className={`ml-auto text-xs px-2 py-1 rounded-full font-medium ${syncStatusClasses(syncStatus ?? activeAccount.sync_status)}`}
             >
-              {syncStatus ?? account.sync_status}
+              {syncStatus ?? activeAccount.sync_status}
             </span>
           </div>
 
@@ -241,17 +338,60 @@ export default function ConnectPage() {
             </div>
           )}
 
-          {account.sync_error && syncStatus !== 'syncing' && (
+          {activeAccount.sync_error && syncStatus !== 'syncing' && (
             <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-              Sync error: {account.sync_error}
+              Sync error: {activeAccount.sync_error}
             </div>
           )}
         </div>
 
+        <div className="mt-4 bg-white rounded-xl border border-gray-200 p-6">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <h2 className="text-base font-semibold text-gray-900">Connect Meta (optional)</h2>
+              <p className="text-sm text-gray-500">
+                Upgrade this account to unlock Business Discovery insights.
+              </p>
+            </div>
+            <span
+              className={`shrink-0 text-xs px-2 py-1 rounded-full border font-medium ${capabilityBadgeClasses(capabilityBadge)}`}
+            >
+              {capabilityBadgeLabel(capabilityBadge)}
+            </span>
+          </div>
+
+          {capabilitiesLoading ? (
+            <p className="text-sm text-gray-500">Checking Meta capability state…</p>
+          ) : (
+            <>
+              {capabilitiesError && (
+                <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
+                  Could not load capability state: {capabilitiesError}
+                </div>
+              )}
+
+              {capabilityBadge === 'meta_upgraded' ? (
+                <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+                  Meta upgrade is active for @{activeAccount.username}. Business Discovery sync can run.
+                </p>
+              ) : (
+                <a
+                  href={oauthMetaUrl}
+                  className="inline-flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-brand-700 transition-colors"
+                >
+                  {capabilityBadge === 'meta_reconnect_needed'
+                    ? 'Reconnect Meta'
+                    : 'Connect Meta'}
+                </a>
+              )}
+            </>
+          )}
+        </div>
+
         <p className="text-sm text-gray-400 mt-4 text-center">
-          Need to reconnect?{' '}
+          Need to reconnect Instagram?{' '}
           <a
-            href={buildOAuthUrl()}
+            href={buildInstagramOAuthUrl()}
             className="text-brand-600 hover:text-brand-700 font-medium"
           >
             Connect again
@@ -270,7 +410,7 @@ export default function ConnectPage() {
       </p>
 
       <a
-        href={buildOAuthUrl()}
+        href={buildInstagramOAuthUrl()}
         className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-xl font-medium hover:bg-brand-700 transition-colors"
       >
         Connect Instagram account

@@ -3,6 +3,7 @@ import moveTokensSql from '../../supabase/migrations/20260301224501_move_tokens_
 import rlsRpcSql from '../../supabase/migrations/20260301224502_harden_accounts_policies_and_add_media_rpc.sql?raw'
 import metricFactsSql from '../../supabase/migrations/20260302183500_add_metric_facts_and_sync_log_metric_tracking.sql?raw'
 import expansionSql from '../../supabase/migrations/20260302185500_expand_metrics_schema_business_discovery_and_rpcs.sql?raw'
+import capabilitiesSql from '../../supabase/migrations/20260302221500_add_account_capabilities_and_sync_capability_gaps.sql?raw'
 
 describe('security policy contracts', () => {
   it('moves encrypted tokens into dedicated token table and drops account token column', () => {
@@ -39,5 +40,13 @@ describe('security policy contracts', () => {
     expect(expansionSql).toContain('create or replace function public.list_account_insights_timeseries')
     expect(expansionSql).toContain('create or replace function public.list_business_discovery_trends')
     expect(expansionSql).toContain("add column if not exists views integer")
+  })
+
+  it('creates capability projection with read-only client access and sync capability diagnostics', () => {
+    expect(capabilitiesSql).toContain('create table if not exists public.instagram_account_capabilities')
+    expect(capabilitiesSql).toContain('check (facebook_connected or not business_discovery_enabled)')
+    expect(capabilitiesSql).toContain('grant select on table public.instagram_account_capabilities to authenticated;')
+    expect(capabilitiesSql).toContain('revoke insert, update, delete on table public.instagram_account_capabilities from authenticated;')
+    expect(capabilitiesSql).toContain('add column if not exists capability_gaps jsonb not null default')
   })
 })
