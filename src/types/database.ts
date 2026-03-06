@@ -140,6 +140,8 @@ export interface SyncLog {
   metrics_succeeded: string[]
   metrics_failed: string[]
   capability_gaps: string[]
+  provider_error_text: string | null
+  provider_error_details: Record<string, string>
   error_message: string | null
   started_at: string
   completed_at: string | null

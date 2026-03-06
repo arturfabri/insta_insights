@@ -4,7 +4,12 @@ import { decryptToken } from '../_shared/crypto.ts'
 import { withRetry, RateLimitError } from '../_shared/retry.ts'
 import { resolveCallerAuth } from '../_shared/caller-auth.ts'
 import { mapInstagramInsightsToDb } from '../_shared/instagram-insights-mapper.ts'
+import {
+  isInvalidMetricError,
+  type IGMediaInsightsResponse,
+} from '../_shared/media-insights-fetch.ts'
 import { isMissingRelationError, readLegacyTokenFromAccountRow } from '../_shared/token-store.ts'
+import { buildProviderErrorDiagnostics } from '../_shared/provider-error-diagnostics.ts'
 import {
   mapAccountMetricsToFacts,
   mapSnapshotMetricsToFacts,
@@ -12,6 +17,14 @@ import {
   type IGInsightMetric,
   type MetricFactRow,
 } from '../_shared/metric-facts.ts'
+import {
+  buildSyncCapabilityMatrix,
+  classifyReturnedMetrics,
+  getAccountMetricBundles,
+  getMediaMetricBundles,
+  resolveSyncWindow,
+  type SyncPeriodDays,
+} from '../_shared/sync-metric-capabilities.ts'
 
 // ─── Environment ────────────────────────────────────────────────────────────
 
@@ -32,19 +45,12 @@ const MAX_POSTS = 400
 const RATE_CAP = 180
 const FACTS_ON_CONFLICT =
   'user_id,account_id,scope,entity_id,metric_name,metric_date,period,metric_type,timeframe,breakdown_type,breakdown_value'
-const ACCOUNT_TOTAL_VALUE_METRICS =
-  'accounts_engaged,follows_and_unfollows,reach,views,total_interactions,reposts,saves,shares,comments,likes,profile_links_taps'
-const ACCOUNT_TIME_SERIES_METRICS =
-  'reach,views,total_interactions,reposts,saves,shares,comments,likes,profile_links_taps'
 const BUSINESS_DISCOVERY_SNAPSHOT_METRICS = [
   'followers_count',
   'follows_count',
   'media_count',
 ]
 const BUSINESS_DISCOVERY_INSIGHTS_METRICS = 'profile_views,website_taps'
-
-const VALID_PERIODS = [90, 180, 360] as const
-type SyncPeriodDays = (typeof VALID_PERIODS)[number]
 
 function cutoffDate(periodDays: SyncPeriodDays): Date {
   return new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000)
@@ -72,14 +78,6 @@ interface IGMediaPage {
   }
 }
 
-interface IGMediaInsightsResponse {
-  data: Array<{
-    name: string
-    values: Array<{ value: number; end_time?: string }>
-  }>
-  error?: { message: string; type: string; code: number }
-}
-
 interface IGUserBusinessDiscoveryResponse {
   business_discovery?: {
     id?: string
@@ -101,11 +99,6 @@ interface IGBusinessDiscoveryInsightsResponse {
 interface IGAccountInsightsResponse {
   data: IGInsightMetric[]
   error?: { message: string; type: string; code: number }
-}
-
-interface AccountInsightsRequest {
-  metricType: 'total_value' | 'time_series'
-  metrics: string
 }
 
 interface BusinessDiscoveryTargetRow {
@@ -143,57 +136,6 @@ function metricKeys(
     .map((name) => `${scope}:${metricType}:${name}`)
 }
 
-/** Return the comma-separated insight metric names for the given media type.
- *
- * API v22 (Instagram Platform — Instagram Login):
- * - `views` is the universal content-view metric for all types, replacing the
- *   deprecated `impressions` (IMAGE/CAROUSEL), `plays` (Reels), and
- *   `video_views` (non-Reel VIDEO).
- * - Reels additionally expose watch-time metrics:
- *     ig_reels_avg_watch_time          (milliseconds)
- *     ig_reels_video_view_total_time   (milliseconds)
- * - `profile_visits`, `follows`, `plays`, `video_views`, `impressions` are
- *   all deprecated in v22 and must NOT be requested.
- */
-function insightFields(_mediaType: string, isReel: boolean): string {
-  if (isReel) {
-    return [
-      'reach',
-      'views',
-      'ig_reels_video_view_total_time',
-      'ig_reels_avg_watch_time',
-      'saved',
-      'shares',
-      'comments',
-      'total_interactions',
-      'replies',
-      'reposts',
-      'reels_skip_rate',
-      'crossposted_views',
-      'facebook_views',
-    ].join(',')
-  }
-  // IMAGE, VIDEO (non-Reel), CAROUSEL_ALBUM
-  return [
-    'reach',
-    'views',
-    'saved',
-    'shares',
-    'comments',
-    'total_interactions',
-    'replies',
-    'reposts',
-    'profile_activity',
-  ].join(',')
-}
-
-function accountInsightsRequests(): AccountInsightsRequest[] {
-  return [
-    { metricType: 'total_value', metrics: ACCOUNT_TOTAL_VALUE_METRICS },
-    { metricType: 'time_series', metrics: ACCOUNT_TIME_SERIES_METRICS },
-  ]
-}
-
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
@@ -207,6 +149,8 @@ Deno.serve(async (req: Request) => {
       accountId?: string
       syncType?: 'initial' | 'manual' | 'cron'
       syncPeriodDays?: number
+      syncMode?: 'standard' | 'backfill'
+      backfillDays?: number
       syncScopes?: {
         media?: boolean
         account?: boolean
@@ -225,11 +169,13 @@ Deno.serve(async (req: Request) => {
 
     const caller = callerResult.caller
 
-    // Validate and default the sync period
-    const periodDays: SyncPeriodDays =
-      VALID_PERIODS.includes(body.syncPeriodDays as SyncPeriodDays)
-        ? (body.syncPeriodDays as SyncPeriodDays)
-        : 90
+    const syncWindow = resolveSyncWindow({
+      syncMode: body.syncMode,
+      syncPeriodDays: body.syncPeriodDays,
+      backfillDays: body.backfillDays,
+    })
+    const periodDays: SyncPeriodDays = syncWindow.periodDays
+    const syncMode = syncWindow.mode
     const requestedScopes = normalizeSyncScopes(body.syncScopes)
 
     // ── 3. Fetch account ─────────────────────────────────────────────────────
@@ -348,6 +294,8 @@ Deno.serve(async (req: Request) => {
         metrics_succeeded_count: 0,
         metrics_failed_count: 0,
         capability_gaps: [],
+        provider_error_text: null,
+        provider_error_details: {},
       })
       .select('id')
       .single()
@@ -370,9 +318,13 @@ Deno.serve(async (req: Request) => {
     const succeededMetricSet = new Set<string>()
     const failedMetricSet = new Set<string>()
     const capabilityGapSet = new Set<string>()
+    const disabledMediaAdvancedGroups = new Set<'media_advanced_reel' | 'media_advanced_standard'>()
+    const disabledAccountAdvancedBundles = new Set<string>()
     let canRunBusinessDiscovery = requestedScopes.businessDiscovery
     const cutoff = cutoffDate(periodDays)
-    console.log(`Sync period: ${periodDays} days (cutoff: ${cutoff.toISOString()})`)
+    console.log(
+      `Sync window mode=${syncMode} source=${syncWindow.source} period=${periodDays} days (cutoff: ${cutoff.toISOString()})`,
+    )
 
     function markAttempted(keys: string[]) {
       keys.forEach((key) => attemptedMetricSet.add(key))
@@ -470,6 +422,12 @@ Deno.serve(async (req: Request) => {
         }
       }
     }
+
+    const syncCapabilityMatrix = buildSyncCapabilityMatrix({
+      apiHost: IG_API_BASE,
+      businessDiscoveryRequested: requestedScopes.businessDiscovery,
+      canRunBusinessDiscovery,
+    })
 
     async function upsertMetricFacts(rows: MetricFactRow[]): Promise<{ error: string | null }> {
       if (rows.length === 0) return { error: null }
@@ -585,6 +543,55 @@ Deno.serve(async (req: Request) => {
       return { error: error?.message ?? null }
     }
 
+    async function fetchMediaInsightsPayload(
+      mediaId: string,
+      metricsCsv: string,
+    ): Promise<IGMediaInsightsResponse> {
+      const insightsUrl = new URL(`${IG_API_BASE}/${mediaId}/insights`)
+      insightsUrl.searchParams.set('metric', metricsCsv)
+      insightsUrl.searchParams.set('period', 'lifetime')
+      insightsUrl.searchParams.set('access_token', accessToken)
+
+      const insightsRes = await withRetry(() =>
+        fetch(insightsUrl.toString()).then((r) => {
+          callCount++
+          if (r.status === 429) throw r
+          return r
+        }),
+      )
+
+      const insightsBody = (await insightsRes.json()) as IGMediaInsightsResponse
+      if (!insightsRes.ok && !insightsBody.error) {
+        throw new Error(`Insights request failed (HTTP ${insightsRes.status})`)
+      }
+      return insightsBody
+    }
+
+    async function fetchAccountInsightsPayload(
+      metricsCsv: string,
+      metricType: 'total_value' | 'time_series',
+    ): Promise<IGAccountInsightsResponse> {
+      const accountInsightsUrl = new URL(`${IG_API_BASE}/${account.instagram_user_id}/insights`)
+      accountInsightsUrl.searchParams.set('metric', metricsCsv)
+      accountInsightsUrl.searchParams.set('period', 'day')
+      accountInsightsUrl.searchParams.set('metric_type', metricType)
+      accountInsightsUrl.searchParams.set('access_token', accessToken)
+
+      const accountInsightsRes = await withRetry(() =>
+        fetch(accountInsightsUrl.toString()).then((r) => {
+          callCount++
+          if (r.status === 429) throw r
+          return r
+        }),
+      )
+
+      const accountInsightsBody = (await accountInsightsRes.json()) as IGAccountInsightsResponse
+      if (!accountInsightsRes.ok && !accountInsightsBody.error) {
+        throw new Error(`Account insights request failed (HTTP ${accountInsightsRes.status})`)
+      }
+      return accountInsightsBody
+    }
+
     try {
       if (requestedScopes.media) {
         while (fetchMore && postsProcessed < MAX_POSTS && !isRateLimited) {
@@ -646,40 +653,104 @@ Deno.serve(async (req: Request) => {
           }
 
           // ── Fetch and upsert insights ──────────────────────────────────────
+          const mediaBundles = getMediaMetricBundles(isReel, syncCapabilityMatrix)
+          const coreMetricKeys = metricKeys('media', 'snapshot', mediaBundles.coreMetricsCsv)
+          const likesMetricKey = 'media:snapshot:likes'
+          const mediaCoreAttemptKeys = [...coreMetricKeys, likesMetricKey]
+          markAttempted(mediaCoreAttemptKeys)
+
           try {
-            const fields = insightFields(item.media_type, isReel)
-            const mediaMetricKeys = metricKeys('media', 'snapshot', fields)
-            mediaMetricKeys.push('media:snapshot:likes')
-            markAttempted(mediaMetricKeys)
-            const insightsUrl = new URL(`${IG_API_BASE}/${item.id}/insights`)
-            insightsUrl.searchParams.set('metric', fields)
-            insightsUrl.searchParams.set('period', 'lifetime')
-            insightsUrl.searchParams.set('access_token', accessToken)
-
-            const insightsRes = await withRetry(() =>
-              fetch(insightsUrl.toString()).then((r) => {
-                callCount++
-                if (!r.ok) throw r
-                return r
-              })
-            )
-            const insightsBody = (await insightsRes.json()) as IGMediaInsightsResponse
-
-            // Some posts return a top-level error instead of data.
-            // Log code + message so we can diagnose metric name issues.
-            if (insightsBody.error) {
-              const errMsg = `[code ${insightsBody.error.code}] ${insightsBody.error.message}`
-              console.warn(`Insights API error for ${item.id}: ${errMsg}`)
+            const corePayload = await fetchMediaInsightsPayload(item.id, mediaBundles.coreMetricsCsv)
+            if (corePayload.error) {
+              const errMsg = `[code ${corePayload.error.code}] ${corePayload.error.message}`
+              console.warn(`Core insights API error for ${item.id}: ${errMsg}`)
               insightErrors++
               if (!firstInsightError) firstInsightError = errMsg
-              markFailed(mediaMetricKeys)
+              markFailed(mediaCoreAttemptKeys)
               postsProcessed++
               continue
             }
 
-            const insightsData = insightsBody.data ?? []
+            const coreInsightsData = corePayload.data ?? []
+            const coreCoverage = classifyReturnedMetrics(
+              mediaBundles.coreMetricsCsv,
+              coreInsightsData.map((metric) => metric.name),
+            )
+            if (coreCoverage.present.length === 0) {
+              const errMsg = `Core insights payload empty for media ${item.id}`
+              console.warn(errMsg)
+              insightErrors++
+              if (!firstInsightError) firstInsightError = errMsg
+              markFailed(mediaCoreAttemptKeys)
+              postsProcessed++
+              continue
+            }
+
+            markSucceeded([
+              ...coreCoverage.present.map((metric) => `media:snapshot:${metric}`),
+              likesMetricKey,
+            ])
+            if (coreCoverage.missing.length > 0) {
+              markFailed(coreCoverage.missing.map((metric) => `media:snapshot:${metric}`))
+              markCapabilityGap(`media:core:partial:${isReel ? 'reel' : 'standard'}`)
+            }
+
+            let combinedInsightsData = [...coreInsightsData]
+
+            const canRequestAdvanced = mediaBundles.advancedMetricsCsv !== null &&
+              mediaBundles.advancedGroupId !== null &&
+              !disabledMediaAdvancedGroups.has(mediaBundles.advancedGroupId)
+
+            if (canRequestAdvanced && mediaBundles.advancedMetricsCsv && mediaBundles.advancedGroupId) {
+              const advancedMetricKeys = metricKeys('media', 'snapshot', mediaBundles.advancedMetricsCsv)
+              markAttempted(advancedMetricKeys)
+
+              try {
+                const advancedPayload = await fetchMediaInsightsPayload(item.id, mediaBundles.advancedMetricsCsv)
+                if (advancedPayload.error) {
+                  const advancedErr = `[code ${advancedPayload.error.code}] ${advancedPayload.error.message}`
+                  if (isInvalidMetricError(advancedPayload.error)) {
+                    disabledMediaAdvancedGroups.add(mediaBundles.advancedGroupId)
+                    markCapabilityGap(`media:${mediaBundles.advancedGroupId}:unsupported`)
+                    console.warn(`Advanced media metrics unsupported (${mediaBundles.advancedGroupId}): ${advancedErr}`)
+                  } else {
+                    insightErrors++
+                    if (!firstInsightError) firstInsightError = advancedErr
+                    console.warn(`Advanced media metrics failed (${mediaBundles.advancedGroupId}): ${advancedErr}`)
+                  }
+                  markFailed(advancedMetricKeys)
+                } else {
+                  const advancedInsightsData = advancedPayload.data ?? []
+                  const advancedCoverage = classifyReturnedMetrics(
+                    mediaBundles.advancedMetricsCsv,
+                    advancedInsightsData.map((metric) => metric.name),
+                  )
+                  markSucceeded(
+                    advancedCoverage.present.map((metric) => `media:snapshot:${metric}`),
+                  )
+                  if (advancedCoverage.missing.length > 0) {
+                    markFailed(advancedCoverage.missing.map((metric) => `media:snapshot:${metric}`))
+                    markCapabilityGap(`media:${mediaBundles.advancedGroupId}:partial`)
+                  }
+                  combinedInsightsData = [...combinedInsightsData, ...advancedInsightsData]
+                }
+              } catch (advancedErr) {
+                if (advancedErr instanceof RateLimitError) {
+                  throw advancedErr
+                }
+                let errStr = 'Advanced media insights unavailable'
+                if (advancedErr instanceof Error) errStr = advancedErr.message
+                else if (advancedErr instanceof Response) errStr = `HTTP ${advancedErr.status}`
+                markFailed(advancedMetricKeys)
+                markCapabilityGap(`media:${mediaBundles.advancedGroupId}:transient_error`)
+                console.warn(`Advanced media metrics warning (${mediaBundles.advancedGroupId}): ${errStr}`)
+                insightErrors++
+                if (!firstInsightError) firstInsightError = errStr
+              }
+            }
+
             const mappedInsights = mapInstagramInsightsToDb({
-              insightsData,
+              insightsData: combinedInsightsData,
               mediaType: item.media_type,
               isReel,
               likeCount: item.like_count ?? 0,
@@ -695,7 +766,7 @@ Deno.serve(async (req: Request) => {
               scope: 'media',
               entityId: mediaRow.id,
               metrics: [
-                ...insightsData,
+                ...combinedInsightsData,
                 {
                   name: 'likes',
                   period: 'lifetime',
@@ -725,23 +796,18 @@ Deno.serve(async (req: Request) => {
               if (metricFactsResult.error) {
                 console.error(`Metric facts upsert failed for ${item.id}: ${metricFactsResult.error}`)
               }
-              markFailed(mediaMetricKeys)
+              markFailed(mediaCoreAttemptKeys)
             } else {
               postsUpserted++
-              markSucceeded(mediaMetricKeys)
             }
           } catch (insightsErr) {
             // Some posts (very old or incompatible) don't support insights.
             // Log and continue — never fail the whole sync for one post.
-            const fallbackMetrics = insightFields(item.media_type, isReel)
-            const fallbackMetricKeys = metricKeys('media', 'snapshot', fallbackMetrics)
-            fallbackMetricKeys.push('media:snapshot:likes')
-            markAttempted(fallbackMetricKeys)
             if (insightsErr instanceof RateLimitError) {
               console.error('Rate limit exhausted during insights fetch')
               isRateLimited = true
               rateLimitEvents++
-              markFailed(fallbackMetricKeys)
+              markFailed(mediaCoreAttemptKeys)
               break
             }
             // Extract meaningful error from thrown Response objects
@@ -766,7 +832,7 @@ Deno.serve(async (req: Request) => {
             console.warn(`Insights unavailable for media ${item.id}: ${errStr}`)
             insightErrors++
             if (!firstInsightError) firstInsightError = errStr
-            markFailed(fallbackMetricKeys)
+            markFailed(mediaCoreAttemptKeys)
           }
 
           postsProcessed++
@@ -788,33 +854,63 @@ Deno.serve(async (req: Request) => {
 
       // ── 10. Fetch account-level insights and persist daily facts ──────────
       if (!isRateLimited && requestedScopes.account) {
-        for (const request of accountInsightsRequests()) {
-          const accountMetricKeys = metricKeys('account', request.metricType, request.metrics)
+        const accountMetricBundles = getAccountMetricBundles(syncCapabilityMatrix)
+        for (const bundle of accountMetricBundles) {
+          if (!bundle.core && disabledAccountAdvancedBundles.has(bundle.id)) continue
+
+          const accountMetricKeys = metricKeys('account', bundle.metricType, bundle.metricsCsv)
           markAttempted(accountMetricKeys)
 
           try {
-            const accountInsightsUrl = new URL(`${IG_API_BASE}/${account.instagram_user_id}/insights`)
-            accountInsightsUrl.searchParams.set('metric', request.metrics)
-            accountInsightsUrl.searchParams.set('period', 'day')
-            accountInsightsUrl.searchParams.set('metric_type', request.metricType)
-            accountInsightsUrl.searchParams.set('access_token', accessToken)
-
-            const accountInsightsRes = await withRetry(() =>
-              fetch(accountInsightsUrl.toString()).then((r) => {
-                callCount++
-                if (!r.ok) throw r
-                return r
-              })
+            const accountInsightsBody = await fetchAccountInsightsPayload(
+              bundle.metricsCsv,
+              bundle.metricType,
             )
-
-            const accountInsightsBody = (await accountInsightsRes.json()) as IGAccountInsightsResponse
             if (accountInsightsBody.error) {
               const errMsg = `[code ${accountInsightsBody.error.code}] ${accountInsightsBody.error.message}`
-              console.warn(`Account insights API error (${request.metricType}): ${errMsg}`)
-              accountInsightErrors++
-              if (!firstAccountInsightError) firstAccountInsightError = errMsg
+              if (!bundle.core && isInvalidMetricError(accountInsightsBody.error)) {
+                disabledAccountAdvancedBundles.add(bundle.id)
+                markCapabilityGap(`account:${bundle.id}:unsupported`)
+                console.warn(`Account advanced metrics unsupported (${bundle.id}): ${errMsg}`)
+              } else {
+                accountInsightErrors++
+                if (!firstAccountInsightError) firstAccountInsightError = errMsg
+                console.warn(`Account insights API error (${bundle.id}): ${errMsg}`)
+              }
               markFailed(accountMetricKeys)
               continue
+            }
+
+            const returnedMetrics = accountInsightsBody.data ?? []
+            const coverage = classifyReturnedMetrics(
+              bundle.metricsCsv,
+              returnedMetrics.map((metric) => metric.name),
+            )
+            const succeededBundleKeys = coverage.present.map(
+              (metric) => `account:${bundle.metricType}:${metric}`,
+            )
+            const missingBundleKeys = coverage.missing.map(
+              (metric) => `account:${bundle.metricType}:${metric}`,
+            )
+
+            if (succeededBundleKeys.length === 0) {
+              if (!bundle.core) {
+                disabledAccountAdvancedBundles.add(bundle.id)
+                markCapabilityGap(`account:${bundle.id}:empty`)
+              } else {
+                accountInsightErrors++
+                if (!firstAccountInsightError) {
+                  firstAccountInsightError = `No account metrics returned for ${bundle.id}`
+                }
+              }
+              markFailed(accountMetricKeys)
+              continue
+            }
+
+            markSucceeded(succeededBundleKeys)
+            if (missingBundleKeys.length > 0) {
+              markFailed(missingBundleKeys)
+              markCapabilityGap(`account:${bundle.id}:partial`)
             }
 
             const fetchedAtIso = new Date().toISOString()
@@ -824,15 +920,15 @@ Deno.serve(async (req: Request) => {
               accountId: account.id,
               scope: 'account',
               entityId: account.id,
-              metrics: accountInsightsBody.data ?? [],
+              metrics: returnedMetrics,
               fetchDate,
               fetchedAtIso,
-              metricSeriesType: request.metricType,
-              metricType: request.metricType,
+              metricSeriesType: bundle.metricType,
+              metricType: bundle.metricType,
             })
             const factsResult = await upsertMetricFacts(accountFacts)
             if (factsResult.error) {
-              console.error(`Account metric facts upsert failed (${request.metricType}): ${factsResult.error}`)
+              console.error(`Account metric facts upsert failed (${bundle.id}): ${factsResult.error}`)
               accountInsightErrors++
               if (!firstAccountInsightError) firstAccountInsightError = factsResult.error
               markFailed(accountMetricKeys)
@@ -841,18 +937,13 @@ Deno.serve(async (req: Request) => {
 
             const projectionResult = await upsertAccountDailyProjection(
               accountFacts,
-              request.metricType,
+              bundle.metricType,
             )
             if (projectionResult.error) {
-              console.error(`Account daily projection upsert failed (${request.metricType}): ${projectionResult.error}`)
+              console.error(`Account daily projection upsert failed (${bundle.id}): ${projectionResult.error}`)
               accountInsightErrors++
               if (!firstAccountInsightError) firstAccountInsightError = projectionResult.error
             }
-
-            const succeededAccountMetricKeys = new Set(
-              accountFacts.map((fact) => `account:${request.metricType}:${fact.metric_name}`),
-            )
-            markSucceeded([...succeededAccountMetricKeys])
           } catch (accountInsightsErr) {
             if (accountInsightsErr instanceof RateLimitError) {
               console.error('Rate limit exhausted during account insights fetch')
@@ -881,7 +972,10 @@ Deno.serve(async (req: Request) => {
               errStr = String(accountInsightsErr)
             }
 
-            console.warn(`Account insights unavailable (${request.metricType}): ${errStr}`)
+            console.warn(`Account insights unavailable (${bundle.id}): ${errStr}`)
+            if (!bundle.core) {
+              markCapabilityGap(`account:${bundle.id}:transient_error`)
+            }
             accountInsightErrors++
             if (!firstAccountInsightError) firstAccountInsightError = errStr
             markFailed(accountMetricKeys)
@@ -1111,6 +1205,11 @@ Deno.serve(async (req: Request) => {
       const failedMetrics = [...failedMetricSet]
         .filter((metricKey) => !succeededMetricSet.has(metricKey))
         .sort()
+      const providerDiagnostics = buildProviderErrorDiagnostics({
+        media: firstInsightError,
+        account: firstAccountInsightError,
+        businessDiscovery: firstBusinessDiscoveryError,
+      })
       await supabase
         .from('instagram_accounts')
         .update({
@@ -1150,6 +1249,8 @@ Deno.serve(async (req: Request) => {
             metrics_succeeded_count: succeededMetrics.length,
             metrics_failed_count: failedMetrics.length,
             capability_gaps: capabilityGaps,
+            provider_error_text: providerDiagnostics.providerErrorText,
+            provider_error_details: providerDiagnostics.providerErrorDetails,
             completed_at: new Date().toISOString(),
           })
           .eq('id', syncLog.id)
@@ -1159,6 +1260,9 @@ Deno.serve(async (req: Request) => {
       return new Response(
         JSON.stringify({
           success: true,
+          syncMode,
+          syncWindowSource: syncWindow.source,
+          syncPeriodDays: periodDays,
           postsProcessed,
           postsUpserted,
           insightErrors,
@@ -1217,6 +1321,11 @@ Deno.serve(async (req: Request) => {
           .filter((metricKey) => !succeededMetricSet.has(metricKey))
           .sort()
         const capabilityGaps = [...capabilityGapSet].sort()
+        const providerDiagnostics = buildProviderErrorDiagnostics({
+          media: firstInsightError,
+          account: firstAccountInsightError,
+          businessDiscovery: firstBusinessDiscoveryError,
+        })
 
         await supabase
           .from('sync_logs')
@@ -1237,6 +1346,8 @@ Deno.serve(async (req: Request) => {
             metrics_failed_count: failedMetrics.length,
             capability_gaps: capabilityGaps,
             error_message: errorMessage,
+            provider_error_text: providerDiagnostics.providerErrorText,
+            provider_error_details: providerDiagnostics.providerErrorDetails,
             completed_at: new Date().toISOString(),
           })
           .eq('id', syncLog.id)

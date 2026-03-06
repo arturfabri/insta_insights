@@ -15,6 +15,7 @@
     "test:security:policy": "vitest run src/security/policy-contracts.test.ts",
     "test:security:smoke": "node scripts/security/rls-smoke.mjs",
     "test:all:security": "npm run test:all && npm run test:security:policy && npm run test:security:smoke",
+    "sync:backfill": "node scripts/run-sync-backfill.mjs",
     "test:watch": "vitest",
     "test:ui": "vitest --ui"
   },

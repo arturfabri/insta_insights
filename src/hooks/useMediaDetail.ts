@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { supabaseClient } from '@/lib/supabase'
 import { useAuth } from '@/context/AuthContext'
 import type { InstagramMediaWithInsights } from '@/types/database'
+import { parseMediaListRpcRows } from '@/types/schemas/mediaListRpc'
 
 interface UseMediaDetailResult {
   media: InstagramMediaWithInsights | null
@@ -36,12 +37,13 @@ export function useMediaDetail(mediaId: string | undefined): UseMediaDetailResul
       setLoading(true)
       setError(null)
 
-      const { data, error: dbError } = await supabaseClient
-        .from('instagram_media')
-        .select('*, insights:instagram_media_insights(*)')
-        .eq('id', mediaId)
-        .eq('user_id', userId) // RLS-friendly guard
-        .single()
+      const { data, error: dbError } = await supabaseClient.rpc('list_media_with_insights', {
+        p_sort_by: 'timestamp',
+        p_media_type: null,
+        p_is_reel: null,
+        p_limit: 1,
+        p_media_row_id: mediaId,
+      })
 
       if (cancelled) return
 
@@ -49,7 +51,17 @@ export function useMediaDetail(mediaId: string | undefined): UseMediaDetailResul
         setError(dbError.message)
         setMedia(null)
       } else {
-        setMedia(data as InstagramMediaWithInsights | null)
+        try {
+          const parsed = parseMediaListRpcRows(data ?? [])
+          setMedia(parsed[0] ?? null)
+        } catch (parseError) {
+          const message =
+            parseError instanceof Error
+              ? `Invalid media payload from server: ${parseError.message}`
+              : 'Invalid media payload from server'
+          setError(message)
+          setMedia(null)
+        }
       }
       setLoading(false)
     }

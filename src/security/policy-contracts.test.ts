@@ -4,6 +4,8 @@ import rlsRpcSql from '../../supabase/migrations/20260301224502_harden_accounts_
 import metricFactsSql from '../../supabase/migrations/20260302183500_add_metric_facts_and_sync_log_metric_tracking.sql?raw'
 import expansionSql from '../../supabase/migrations/20260302185500_expand_metrics_schema_business_discovery_and_rpcs.sql?raw'
 import capabilitiesSql from '../../supabase/migrations/20260302221500_add_account_capabilities_and_sync_capability_gaps.sql?raw'
+import repairSignalsSql from '../../supabase/migrations/20260306005000_repair_media_insights_and_extend_media_rpc.sql?raw'
+import providerErrorsSql from '../../supabase/migrations/20260306105200_add_sync_log_provider_error_fields.sql?raw'
 
 describe('security policy contracts', () => {
   it('moves encrypted tokens into dedicated token table and drops account token column', () => {
@@ -48,5 +50,25 @@ describe('security policy contracts', () => {
     expect(capabilitiesSql).toContain('grant select on table public.instagram_account_capabilities to authenticated;')
     expect(capabilitiesSql).toContain('revoke insert, update, delete on table public.instagram_account_capabilities from authenticated;')
     expect(capabilitiesSql).toContain('add column if not exists capability_gaps jsonb not null default')
+  })
+
+  it('repairs missing insights and extends media RPC with row-level detail filter', () => {
+    expect(repairSignalsSql).toContain('update public.instagram_media_insights i')
+    expect(repairSignalsSql).toContain('insert into public.instagram_media_insights')
+    expect(repairSignalsSql).toContain('p_media_row_id uuid default null')
+    expect(repairSignalsSql).toContain('and (p_media_row_id is null or m.id = p_media_row_id)')
+    expect(repairSignalsSql).toContain('security definer')
+    expect(repairSignalsSql).toContain('set search_path = public')
+    expect(repairSignalsSql).toContain('revoke execute on function public.list_media_with_insights(text, text, boolean, integer, uuid) from public;')
+    expect(repairSignalsSql).toContain('grant execute on function public.list_media_with_insights(text, text, boolean, integer, uuid) to authenticated;')
+    expect(repairSignalsSql).toContain('mismatched_insights_owner_count')
+    expect(repairSignalsSql).toContain('media_without_insights_count')
+  })
+
+  it('adds provider error diagnostics columns to sync logs', () => {
+    expect(providerErrorsSql).toContain('alter table public.sync_logs')
+    expect(providerErrorsSql).toContain('add column if not exists provider_error_text text')
+    expect(providerErrorsSql).toContain("add column if not exists provider_error_details jsonb not null default '{}'::jsonb")
+    expect(providerErrorsSql).toContain("column_name in ('provider_error_text', 'provider_error_details')")
   })
 })
