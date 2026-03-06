@@ -10,7 +10,6 @@ import type { ReactNode } from 'react'
 const LoginPage = lazy(() => import('@/pages/LoginPage'))
 const SignupPage = lazy(() => import('@/pages/SignupPage'))
 const ConnectPage = lazy(() => import('@/pages/ConnectPage'))
-const OAuthCallbackPage = lazy(() => import('@/pages/OAuthCallbackPage'))
 const OAuthFacebookCallbackPage = lazy(() => import('@/pages/OAuthFacebookCallbackPage'))
 const DashboardPage = lazy(() => import('@/pages/DashboardPage'))
 const PostDetailPage = lazy(() => import('@/pages/PostDetailPage'))
@@ -52,7 +51,6 @@ function AppRoutes() {
         {/* Public routes */}
         <Route path="/login" element={<LoginPage />} />
         <Route path="/signup" element={<SignupPage />} />
-        <Route path="/oauth/callback" element={<OAuthCallbackPage />} />
         <Route path="/oauth/facebook-callback" element={<OAuthFacebookCallbackPage />} />
 
         {/* Protected routes — wrapped in app shell */}

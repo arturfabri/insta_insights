@@ -75,8 +75,8 @@ describe('BusinessDiscoveryCapabilityGate', () => {
       </MemoryRouter>,
     )
 
-    expect(screen.getByText(/meta connection required/i)).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /connect meta/i })).toHaveAttribute(
+    expect(screen.getByText(/business connection required/i)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /reconnect account/i })).toHaveAttribute(
       'href',
       '/connect?accountId=acc-42',
     )

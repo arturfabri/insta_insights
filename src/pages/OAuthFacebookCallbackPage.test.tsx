@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import OAuthFacebookCallbackPage from './OAuthFacebookCallbackPage'
+import { buildBusinessLoginState } from '@/lib/account-capabilities'
 
 vi.mock('@/lib/supabase', () => ({
   supabaseClient: {
@@ -29,7 +30,7 @@ function renderCallback(search: string) {
 
 describe('OAuthFacebookCallbackPage', () => {
   it('shows session-expired error when code is present but no auth session exists', async () => {
-    const state = window.btoa(JSON.stringify({ accountId: 'acc-1' }))
+    const state = buildBusinessLoginState('acc-1')
     renderCallback(`?code=test123&state=${encodeURIComponent(state)}`)
     await screen.findByText(/meta connection failed/i)
     expect(screen.getByText(/session expired/i)).toBeInTheDocument()
@@ -43,18 +44,25 @@ describe('OAuthFacebookCallbackPage', () => {
   })
 
   it('shows error state when code param is missing', async () => {
-    const state = window.btoa(JSON.stringify({ accountId: 'acc-1' }))
+    const state = buildBusinessLoginState('acc-1')
     renderCallback(`?state=${encodeURIComponent(state)}`)
     const alert = await screen.findByText(/meta connection failed/i)
     expect(alert).toBeInTheDocument()
     expect(screen.getByText(/no authorisation code/i)).toBeInTheDocument()
   })
 
-  it('shows error state when oauth state does not include account context', async () => {
+  it('allows first-time connect state without an accountId', async () => {
+    const state = buildBusinessLoginState(null)
+    renderCallback(`?code=test123&state=${encodeURIComponent(state)}`)
+    await screen.findByText(/meta connection failed/i)
+    expect(screen.getByText(/session expired/i)).toBeInTheDocument()
+  })
+
+  it('shows error state when oauth state is missing', async () => {
     renderCallback('?code=test123')
     const alert = await screen.findByText(/meta connection failed/i)
     expect(alert).toBeInTheDocument()
-    expect(screen.getByText(/missing account context/i)).toBeInTheDocument()
+    expect(screen.getByText(/missing oauth state/i)).toBeInTheDocument()
   })
 
   it('shows back-to-connections link on error', async () => {

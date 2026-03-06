@@ -49,11 +49,11 @@ export default function AppShell() {
           >
             <span aria-hidden="true">⚠️</span>
             <span>
-              Your Instagram connection expires soon.{' '}
+              Your Meta Business connection expires soon.{' '}
               <Link to="/connect" className="font-medium underline underline-offset-2 hover:no-underline">
                 Reconnect now
               </Link>{' '}
-              to keep your data syncing.
+              to keep your data syncing with full insight coverage.
             </span>
           </div>
         )}

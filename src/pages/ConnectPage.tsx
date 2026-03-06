@@ -7,9 +7,10 @@ import { useSyncStatus } from '@/hooks/useSyncStatus'
 import { useAccountCapabilities } from '@/hooks/useAccountCapabilities'
 import SyncStatusBanner from '@/components/SyncStatusBanner'
 import { supabaseClient } from '@/lib/supabase'
-import { buildFacebookOAuthState, deriveCapabilityBadge } from '@/lib/account-capabilities'
-
-const META_APP_ID = import.meta.env.VITE_META_APP_ID as string
+import {
+  buildBusinessLoginUrl,
+  deriveConnectionStatus,
+} from '@/lib/account-capabilities'
 
 const SYNC_PERIODS = [
   { days: 90, label: '90 days' },
@@ -19,12 +20,10 @@ const SYNC_PERIODS = [
 
 type SyncPeriodDays = 90 | 180 | 360
 
-type CapabilityBadgeLabel = 'Instagram only' | 'Meta upgraded' | 'Meta reconnect needed'
-
 const PERIOD_STORAGE_KEY = 'insta_insights_sync_period'
 const ACCOUNT_STORAGE_KEY = 'insta_insights_selected_account_id'
-/** Sync locks older than this are considered stale (Edge Function timed out) */
-const STALE_SYNC_MS = 10 * 60 * 1000 // 10 minutes
+/** Sync locks older than this are treated as timed-out and can be retried. */
+const STALE_SYNC_MS = 10 * 60 * 1000
 
 function readStoredPeriod(): SyncPeriodDays {
   const stored = parseInt(localStorage.getItem(PERIOD_STORAGE_KEY) ?? '', 10)
@@ -38,27 +37,6 @@ function readStoredAccountId(): string | null {
   return stored && stored.trim().length > 0 ? stored : null
 }
 
-function buildInstagramOAuthUrl(): string {
-  const params = new URLSearchParams({
-    client_id: META_APP_ID,
-    redirect_uri: `${window.location.origin}/oauth/callback`,
-    scope: 'instagram_business_basic,instagram_business_manage_insights',
-    response_type: 'code',
-  })
-  return `https://www.instagram.com/oauth/authorize?${params.toString()}`
-}
-
-function buildFacebookOAuthUrl(accountId: string): string {
-  const params = new URLSearchParams({
-    client_id: META_APP_ID,
-    redirect_uri: `${window.location.origin}/oauth/facebook-callback`,
-    scope: 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement',
-    response_type: 'code',
-    state: buildFacebookOAuthState(accountId),
-  })
-  return `https://www.facebook.com/v22.0/dialog/oauth?${params.toString()}`
-}
-
 function syncStatusClasses(status: string | null): string {
   if (status === 'complete') return 'bg-green-100 text-green-700'
   if (status === 'syncing') return 'bg-blue-100 text-blue-700'
@@ -67,21 +45,40 @@ function syncStatusClasses(status: string | null): string {
   return 'bg-gray-100 text-gray-600'
 }
 
-function capabilityBadgeLabel(status: string): CapabilityBadgeLabel {
-  if (status === 'meta_upgraded') return 'Meta upgraded'
-  if (status === 'meta_reconnect_needed') return 'Meta reconnect needed'
-  return 'Instagram only'
-}
+function statusCopy(status: ReturnType<typeof deriveConnectionStatus>): {
+  badge: string
+  description: string
+  actionLabel: string
+} {
+  if (status === 'connected') {
+    return {
+      badge: 'Connected',
+      description:
+        'Meta Business Login is active for this account. Full-scope sync and Business Discovery are available.',
+      actionLabel: 'Reconnect account',
+    }
+  }
 
-function capabilityBadgeClasses(status: string): string {
-  if (status === 'meta_upgraded') return 'bg-green-100 text-green-700 border-green-200'
-  if (status === 'meta_reconnect_needed') return 'bg-amber-100 text-amber-700 border-amber-200'
-  return 'bg-gray-100 text-gray-600 border-gray-200'
+  if (status === 'reconnect_required') {
+    return {
+      badge: 'Reconnect required',
+      description:
+        'This account needs a fresh Meta Business login before sync can continue with full insight coverage.',
+      actionLabel: 'Reconnect account',
+    }
+  }
+
+  return {
+    badge: 'Not connected',
+    description:
+      'This account was connected before the Business Login flow was enforced and must be reconnected.',
+    actionLabel: 'Reconnect account',
+  }
 }
 
 export default function ConnectPage() {
   const [searchParams] = useSearchParams()
-  const { accounts, loading, refetch } = useInstagramAccounts()
+  const { accounts, loading, error: accountsError, refetch } = useInstagramAccounts()
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(readStoredAccountId)
   const [syncing, setSyncing] = useState(false)
   const [syncPeriod, setSyncPeriodState] = useState<SyncPeriodDays>(readStoredPeriod)
@@ -120,6 +117,11 @@ export default function ConnectPage() {
     refetch: refetchCapabilities,
   } = useAccountCapabilities(activeAccount?.id)
 
+  const connectionStatus = useMemo(
+    () => deriveConnectionStatus(capabilities),
+    [capabilities],
+  )
+
   const setSyncPeriod = (days: SyncPeriodDays) => {
     localStorage.setItem(PERIOD_STORAGE_KEY, String(days))
     setSyncPeriodState(days)
@@ -145,23 +147,20 @@ export default function ConnectPage() {
     return new Date(activeAccount.token_expires_at) < fourteenDaysFromNow
   }, [activeAccount])
 
-  // True when sync_status has been 'syncing' for more than 10 minutes,
-  // which means the Edge Function timed out without updating the status.
   const isStaleSyncing = useMemo(() => {
     if (syncStatus !== 'syncing' || !activeAccount) return false
     return Date.now() - new Date(activeAccount.updated_at).getTime() > STALE_SYNC_MS
   }, [syncStatus, activeAccount])
 
-  const capabilityBadge = useMemo(
-    () => deriveCapabilityBadge(capabilities),
-    [capabilities],
+  const connectUrl = useMemo(
+    () => buildBusinessLoginUrl(activeAccount?.id ?? null),
+    [activeAccount?.id],
   )
 
-  // Trigger a sync via the Edge Function
   const invokeSync = useCallback(async () => {
-    if (!activeAccount || syncing) return
-    // Block while an active (non-stale) sync is running
+    if (!activeAccount || syncing || connectionStatus !== 'connected') return
     if (syncStatus === 'syncing' && !isStaleSyncing) return
+
     setSyncing(true)
     try {
       const { data: syncResult, error } = await supabaseClient.functions.invoke<{
@@ -174,9 +173,8 @@ export default function ConnectPage() {
       }>('instagram-sync', {
         body: { accountId: activeAccount.id, syncPeriodDays: syncPeriod },
       })
+
       if (error) {
-        // error.message is always the generic Supabase wrapper text.
-        // Read the actual response body to surface the real reason.
         let detail = 'Sync request failed'
         try {
           const body = await (error.context as Response).text()
@@ -201,16 +199,22 @@ export default function ConnectPage() {
     } finally {
       setSyncing(false)
     }
-  }, [activeAccount, syncing, syncStatus, isStaleSyncing, syncPeriod, refetch, refetchCapabilities])
+  }, [
+    activeAccount,
+    connectionStatus,
+    isStaleSyncing,
+    refetch,
+    refetchCapabilities,
+    syncPeriod,
+    syncStatus,
+    syncing,
+  ])
 
-  // Auto-trigger initial sync when account is newly connected (never synced)
   useEffect(() => {
-    if (activeAccount && !activeAccount.last_synced_at && syncStatus !== 'syncing') {
-      void invokeSync()
-    }
-    // Only run once when account first becomes available.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeAccount?.id])
+    if (!activeAccount || connectionStatus !== 'connected') return
+    if (activeAccount.last_synced_at || syncStatus === 'syncing') return
+    void invokeSync()
+  }, [activeAccount, connectionStatus, invokeSync, syncStatus])
 
   if (loading) {
     return (
@@ -220,39 +224,57 @@ export default function ConnectPage() {
     )
   }
 
-  if (activeAccount) {
-    // isSyncing controls button/pill disabled state.
-    // A stale sync is NOT treated as active — we want UI controls enabled.
-    const isSyncing = syncing || (syncStatus === 'syncing' && !isStaleSyncing)
-    const oauthMetaUrl = buildFacebookOAuthUrl(activeAccount.id)
+  if (!activeAccount) {
+    return (
+      <div className="max-w-2xl mx-auto mt-16 px-4 text-center">
+        <div className="text-5xl mb-4">📸</div>
+        <h1 className="text-2xl font-bold text-gray-900 mb-2">Connect Instagram via Meta</h1>
+        <p className="text-gray-500 mb-8">
+          Use Meta Business Login to connect the Instagram professional account and grant the full insight scope this app needs.
+        </p>
 
+        <div className="text-left rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900 mb-3">Before you continue</h2>
+          <ul className="space-y-2 text-sm text-gray-600">
+            <li>Your Instagram account must be a professional account linked to a Facebook Page.</li>
+            <li>You must be able to approve Page access for the connected Meta business.</li>
+            <li>Some demographic metrics only appear once the account has enough follower or engagement volume.</li>
+          </ul>
+
+          {accountsError && (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+              Could not load your existing accounts: {accountsError}
+            </div>
+          )}
+
+          <a
+            href={buildBusinessLoginUrl(null)}
+            className="mt-6 inline-flex items-center gap-2 rounded-xl bg-brand-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-brand-700"
+          >
+            Continue with Meta Business Login
+          </a>
+        </div>
+
+        <p className="mt-4 text-xs text-gray-400">
+          The login flow can open Facebook or Instagram, but it always uses the Meta Business permissions required for full analytics.
+        </p>
+      </div>
+    )
+  }
+
+  const connection = statusCopy(connectionStatus)
+  const isSyncing = syncing || (syncStatus === 'syncing' && !isStaleSyncing)
+
+  if (connectionStatus !== 'connected') {
     return (
       <div className="max-w-lg mx-auto mt-16">
-        <h1 className="text-2xl font-bold text-gray-900 mb-6">Instagram Account</h1>
+        <h1 className="text-2xl font-bold text-gray-900 mb-6">Connections</h1>
 
-        {isStaleSyncing ? (
-          <div className="mb-4 flex items-center gap-3 px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
-            <span className="shrink-0">⚠️</span>
-            <span className="flex-1">
-              Sync seems stuck — the previous attempt may have timed out.
-            </span>
-            <button
-              onClick={invokeSync}
-              disabled={syncing}
-              className="shrink-0 font-medium underline underline-offset-2 hover:no-underline disabled:opacity-50"
-            >
-              {syncing ? 'Retrying…' : 'Force retry'}
-            </button>
-          </div>
-        ) : (
-          <SyncStatusBanner onRetry={invokeSync} className="mb-4" />
-        )}
-
-        <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <div className="rounded-xl border border-gray-200 bg-white p-6">
           {accounts.length > 1 && (
             <div className="mb-4">
               <label htmlFor="account-select" className="block text-xs font-medium text-gray-500 mb-2">
-                Connected account
+                Account
               </label>
               <select
                 id="account-select"
@@ -269,157 +291,172 @@ export default function ConnectPage() {
             </div>
           )}
 
-          {/* Account header */}
           <div className="flex items-center gap-3 mb-4">
             <div className="w-10 h-10 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 font-bold text-lg">
               @
             </div>
             <div>
               <p className="font-semibold text-gray-900">@{activeAccount.username}</p>
-              <p className="text-sm text-gray-500">Connected</p>
+              <p className="text-sm text-gray-500">{connection.badge}</p>
             </div>
-            <span
-              className={`ml-auto text-xs px-2 py-1 rounded-full font-medium ${syncStatusClasses(syncStatus ?? activeAccount.sync_status)}`}
-            >
-              {syncStatus ?? activeAccount.sync_status}
-            </span>
-          </div>
-
-          {/* Sync period selector */}
-          <div className="border-t border-gray-100 pt-4 mb-4">
-            <p className="text-xs font-medium text-gray-500 mb-2">Sync window</p>
-            <div className="flex gap-2">
-              {SYNC_PERIODS.map(({ days, label }) => (
-                <button
-                  key={days}
-                  onClick={() => setSyncPeriod(days)}
-                  disabled={isSyncing}
-                  className={`flex-1 text-xs px-3 py-1.5 rounded-lg font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                    syncPeriod === days
-                      ? 'bg-brand-600 border-brand-600 text-white'
-                      : 'bg-white border-gray-200 text-gray-600 hover:border-brand-400 hover:text-brand-600'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <p className="text-xs text-gray-400 mt-1.5">
-              {syncPeriod === 360
-                ? 'Up to 400 posts — large accounts may need multiple sync runs.'
-                : syncPeriod === 180
-                ? 'Up to 400 posts from the last 6 months.'
-                : 'Up to 400 posts from the last 3 months.'}
-            </p>
-          </div>
-
-          {/* Last synced + Sync now */}
-          <div className="text-sm text-gray-500 border-t border-gray-100 pt-4 flex items-center justify-between">
-            <span>Last synced: {lastSynced}</span>
-            <button
-              onClick={invokeSync}
-              disabled={isSyncing}
-              className="inline-flex items-center gap-2 text-sm text-brand-600 hover:text-brand-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isSyncing ? (
-                <>
-                  <span className="w-3 h-3 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-                  Syncing…
-                </>
-              ) : (
-                'Sync now'
-              )}
-            </button>
-          </div>
-
-          {tokenWarning && (
-            <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
-              ⚠️ Your Instagram connection expires soon. Reconnect to keep your data syncing.
-            </div>
-          )}
-
-          {activeAccount.sync_error && syncStatus !== 'syncing' && (
-            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-              Sync error: {activeAccount.sync_error}
-            </div>
-          )}
-        </div>
-
-        <div className="mt-4 bg-white rounded-xl border border-gray-200 p-6">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <div>
-              <h2 className="text-base font-semibold text-gray-900">Connect Meta (optional)</h2>
-              <p className="text-sm text-gray-500">
-                Upgrade this account to unlock Business Discovery insights.
-              </p>
-            </div>
-            <span
-              className={`shrink-0 text-xs px-2 py-1 rounded-full border font-medium ${capabilityBadgeClasses(capabilityBadge)}`}
-            >
-              {capabilityBadgeLabel(capabilityBadge)}
-            </span>
           </div>
 
           {capabilitiesLoading ? (
-            <p className="text-sm text-gray-500">Checking Meta capability state…</p>
+            <p className="text-sm text-gray-500">Checking connection state…</p>
           ) : (
-            <>
-              {capabilitiesError && (
-                <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
-                  Could not load capability state: {capabilitiesError}
-                </div>
-              )}
-
-              {capabilityBadge === 'meta_upgraded' ? (
-                <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
-                  Meta upgrade is active for @{activeAccount.username}. Business Discovery sync can run.
-                </p>
-              ) : (
-                <a
-                  href={oauthMetaUrl}
-                  className="inline-flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-brand-700 transition-colors"
-                >
-                  {capabilityBadge === 'meta_reconnect_needed'
-                    ? 'Reconnect Meta'
-                    : 'Connect Meta'}
-                </a>
-              )}
-            </>
+            <p className="text-sm text-gray-600">{connection.description}</p>
           )}
-        </div>
 
-        <p className="text-sm text-gray-400 mt-4 text-center">
-          Need to reconnect Instagram?{' '}
+          {capabilitiesError && (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+              Could not load connection capabilities: {capabilitiesError}
+            </div>
+          )}
+
+          <div className="mt-6 rounded-xl border border-gray-100 bg-gray-50 p-4">
+            <h2 className="text-sm font-semibold text-gray-900 mb-2">Required permissions</h2>
+            <p className="text-sm text-gray-600">
+              This flow requests `instagram_business_basic`, `instagram_business_manage_insights`, `pages_show_list`, and `pages_read_engagement`.
+            </p>
+          </div>
+
           <a
-            href={buildInstagramOAuthUrl()}
-            className="text-brand-600 hover:text-brand-700 font-medium"
+            href={connectUrl}
+            className="mt-6 inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-700"
           >
-            Connect again
+            {connection.actionLabel}
           </a>
-        </p>
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="max-w-lg mx-auto mt-16 text-center">
-      <div className="text-5xl mb-4">📸</div>
-      <h1 className="text-2xl font-bold text-gray-900 mb-2">Connect Instagram</h1>
-      <p className="text-gray-500 mb-8">
-        Connect your Creator or Business account to start analysing your posts.
-      </p>
+    <div className="max-w-lg mx-auto mt-16">
+      <h1 className="text-2xl font-bold text-gray-900 mb-6">Connections</h1>
 
-      <a
-        href={buildInstagramOAuthUrl()}
-        className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-xl font-medium hover:bg-brand-700 transition-colors"
-      >
-        Connect Instagram account
-      </a>
+      {isStaleSyncing ? (
+        <div className="mb-4 flex items-center gap-3 px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
+          <span className="shrink-0">⚠️</span>
+          <span className="flex-1">
+            Sync seems stuck. The previous attempt may have timed out.
+          </span>
+          <button
+            onClick={invokeSync}
+            disabled={syncing}
+            className="shrink-0 font-medium underline underline-offset-2 hover:no-underline disabled:opacity-50"
+          >
+            {syncing ? 'Retrying…' : 'Force retry'}
+          </button>
+        </div>
+      ) : (
+        <SyncStatusBanner onRetry={invokeSync} className="mb-4" />
+      )}
 
-      <p className="text-xs text-gray-400 mt-4">
-        You&apos;ll be redirected to Instagram to authorise access.
-        We only read your posts and insights — we never post on your behalf.
-      </p>
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        {accounts.length > 1 && (
+          <div className="mb-4">
+            <label htmlFor="account-select" className="block text-xs font-medium text-gray-500 mb-2">
+              Connected account
+            </label>
+            <select
+              id="account-select"
+              value={activeAccount.id}
+              onChange={(event) => onSelectAccount(event.target.value)}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:border-brand-500 focus:outline-none"
+            >
+              {accounts.map((item) => (
+                <option key={item.id} value={item.id}>
+                  @{item.username}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 font-bold text-lg">
+            @
+          </div>
+          <div>
+            <p className="font-semibold text-gray-900">@{activeAccount.username}</p>
+            <p className="text-sm text-gray-500">Business Login active</p>
+          </div>
+          <span
+            className={`ml-auto text-xs px-2 py-1 rounded-full font-medium ${syncStatusClasses(syncStatus ?? activeAccount.sync_status)}`}
+          >
+            {syncStatus ?? activeAccount.sync_status}
+          </span>
+        </div>
+
+        <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+          Meta Business Login is active for this account. Full-scope sync and Business Discovery are available.
+        </div>
+
+        <div className="border-t border-gray-100 pt-4 mt-4 mb-4">
+          <p className="text-xs font-medium text-gray-500 mb-2">Sync window</p>
+          <div className="flex gap-2">
+            {SYNC_PERIODS.map(({ days, label }) => (
+              <button
+                key={days}
+                onClick={() => setSyncPeriod(days)}
+                disabled={isSyncing}
+                className={`flex-1 text-xs px-3 py-1.5 rounded-lg font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  syncPeriod === days
+                    ? 'bg-brand-600 border-brand-600 text-white'
+                    : 'bg-white border-gray-200 text-gray-600 hover:border-brand-400 hover:text-brand-600'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-1.5">
+            {syncPeriod === 360
+              ? 'Up to 400 posts. Large accounts may need multiple sync runs.'
+              : syncPeriod === 180
+              ? 'Up to 400 posts from the last 6 months.'
+              : 'Up to 400 posts from the last 3 months.'}
+          </p>
+        </div>
+
+        <div className="text-sm text-gray-500 border-t border-gray-100 pt-4 flex items-center justify-between">
+          <span>Last synced: {lastSynced}</span>
+          <button
+            onClick={invokeSync}
+            disabled={isSyncing}
+            className="inline-flex items-center gap-2 text-sm text-brand-600 hover:text-brand-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isSyncing ? (
+              <>
+                <span className="w-3 h-3 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+                Syncing…
+              </>
+            ) : (
+              'Sync now'
+            )}
+          </button>
+        </div>
+
+        {tokenWarning && (
+          <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
+            Your Business Login token expires soon. Reconnect now to keep sync and insight coverage active.
+          </div>
+        )}
+
+        {activeAccount.sync_error && syncStatus !== 'syncing' && (
+          <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            Sync error: {activeAccount.sync_error}
+          </div>
+        )}
+
+        <a
+          href={connectUrl}
+          className="mt-6 inline-flex items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:border-brand-300 hover:text-brand-700"
+        >
+          Reconnect account
+        </a>
+      </div>
     </div>
   )
 }

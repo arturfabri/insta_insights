@@ -95,7 +95,7 @@ export default function DashboardPage() {
         <EmptyState
           icon="📭"
           title="No posts yet"
-          description="Connect your Instagram account and sync your posts to get started."
+          description="Connect your Instagram business account through Meta Business Login and sync your posts to get started."
           action={{ label: 'Go to Connect', href: '/connect' }}
         />
       ) : (

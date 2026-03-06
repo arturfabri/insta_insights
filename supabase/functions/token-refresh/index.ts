@@ -22,7 +22,7 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const TOKEN_ENCRYPTION_KEY = Deno.env.get('TOKEN_ENCRYPTION_KEY')!
 const CRON_SECRET = Deno.env.get('CRON_SECRET')!
 
-const IG_API_BASE = 'https://graph.instagram.com/v21.0'
+const IG_API_BASE = 'https://graph.instagram.com/v25.0'
 const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000
 const ONE_DAY_SEC = 86400
 
@@ -89,6 +89,23 @@ Deno.serve(async (req: Request) => {
       (tokenRows ?? []).map((row) => [row.account_id, row]),
     )
 
+    const { data: fbTokenRows, error: fbTokenRowsError } = await supabase
+      .from('instagram_account_fb_tokens')
+      .select('account_id, user_id, access_token_enc')
+      .in('account_id', accountIds)
+
+    if (fbTokenRowsError && !isMissingRelationError(fbTokenRowsError)) {
+      console.error('Failed to fetch Business Login token rows:', fbTokenRowsError)
+      return new Response(JSON.stringify({ error: 'Failed to fetch Business Login token rows' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    const fbTokenByAccount = new Map(
+      (fbTokenRows ?? []).map((row) => [row.account_id, row]),
+    )
+
     const tokenTableMissing = isMissingRelationError(tokenRowsError)
     if (tokenTableMissing) {
       console.warn('Token table missing; token-refresh will use legacy account token column')
@@ -103,10 +120,16 @@ Deno.serve(async (req: Request) => {
 
     for (const account of accounts) {
       try {
+        const fbTokenRow = fbTokenByAccount.get(account.id)
         const tokenRow = tokenByAccount.get(account.id)
-        let encryptedToken = tokenRow?.access_token_enc ?? null
+        let encryptedToken = fbTokenRow?.access_token_enc ?? tokenRow?.access_token_enc ?? null
 
-        if (!encryptedToken || tokenRow?.user_id !== account.user_id || tokenTableMissing) {
+        if (
+          !encryptedToken ||
+          fbTokenRow?.user_id !== account.user_id ||
+          tokenRow?.user_id !== account.user_id ||
+          tokenTableMissing
+        ) {
           const { data: legacyAccountRow, error: legacyTokenError } = await supabase
             .from('instagram_accounts')
             .select('access_token_enc')
@@ -177,15 +200,37 @@ Deno.serve(async (req: Request) => {
         } else {
           const { error: tokenUpdateError } = await supabase
             .from('instagram_account_tokens')
-            .update({
-              access_token_enc: newTokenEnc,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('account_id', account.id)
-            .eq('user_id', account.user_id)
+            .upsert(
+              {
+                account_id: account.id,
+                user_id: account.user_id,
+                access_token_enc: newTokenEnc,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'account_id' },
+            )
 
           if (tokenUpdateError) {
             throw new Error(`Token update failed: ${tokenUpdateError.message}`)
+          }
+        }
+
+        if (fbTokenRow || fbTokenRowsError === null) {
+          const { error: fbTokenUpdateError } = await supabase
+            .from('instagram_account_fb_tokens')
+            .upsert(
+              {
+                account_id: account.id,
+                user_id: account.user_id,
+                access_token_enc: newTokenEnc,
+                token_expires_at: newExpiresAt,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'account_id' },
+            )
+
+          if (fbTokenUpdateError && !isMissingRelationError(fbTokenUpdateError)) {
+            throw new Error(`Business Login token update failed: ${fbTokenUpdateError.message}`)
           }
         }
 

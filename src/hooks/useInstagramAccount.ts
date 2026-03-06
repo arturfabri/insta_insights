@@ -40,6 +40,8 @@ export function useInstagramAccount(): UseInstagramAccountResult {
           'id, user_id, instagram_user_id, username, token_expires_at, last_synced_at, sync_status, sync_error, created_at, updated_at',
         )
         .eq('user_id', userId)
+        .order('created_at', { ascending: true })
+        .limit(1)
         .maybeSingle()
 
       if (cancelled) return

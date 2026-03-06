@@ -27,7 +27,7 @@ describe('resolveSyncWindow', () => {
 describe('buildSyncCapabilityMatrix', () => {
   it('enables media/account bundles for instagram host and business discovery when allowed', () => {
     const matrix = buildSyncCapabilityMatrix({
-      apiHost: 'https://graph.instagram.com/v22.0',
+      apiHost: 'https://graph.instagram.com/v25.0',
       businessDiscoveryRequested: true,
       canRunBusinessDiscovery: true,
     })
@@ -55,7 +55,7 @@ describe('buildSyncCapabilityMatrix', () => {
 
 describe('metric bundle planners', () => {
   const matrix = buildSyncCapabilityMatrix({
-    apiHost: 'https://graph.instagram.com/v22.0',
+    apiHost: 'https://graph.instagram.com/v25.0',
     businessDiscoveryRequested: false,
     canRunBusinessDiscovery: false,
   })

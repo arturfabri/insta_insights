@@ -35,8 +35,8 @@ const CRON_SECRET = Deno.env.get('CRON_SECRET')
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const IG_API_BASE = 'https://graph.instagram.com/v22.0'
-const FB_GRAPH_API_BASE = 'https://graph.facebook.com/v22.0'
+const IG_API_BASE = 'https://graph.instagram.com/v25.0'
+const FB_GRAPH_API_BASE = 'https://graph.facebook.com/v25.0'
 const MEDIA_FIELDS =
   'id,media_type,media_product_type,caption,permalink,thumbnail_url,media_url,timestamp,like_count'
 /** Hard cap on posts per sync run; raised to 400 to support up to 360-day windows */
@@ -239,7 +239,14 @@ Deno.serve(async (req: Request) => {
       .eq('user_id', accountUserId)
       .maybeSingle()
 
-    let encryptedToken = tokenRow?.access_token_enc ?? null
+    const { data: fbTokenRow, error: fbTokenError } = await supabase
+      .from('instagram_account_fb_tokens')
+      .select('access_token_enc,token_expires_at')
+      .eq('account_id', account.id)
+      .eq('user_id', accountUserId)
+      .maybeSingle()
+
+    let encryptedToken = fbTokenRow?.access_token_enc ?? tokenRow?.access_token_enc ?? null
     if (!encryptedToken) {
       encryptedToken = readLegacyTokenFromAccountRow(account)
       if (encryptedToken) {
@@ -252,7 +259,10 @@ Deno.serve(async (req: Request) => {
     }
 
     if (!encryptedToken) {
-      const details = tokenError?.message ?? 'Token row missing and legacy token unavailable'
+      const details =
+        fbTokenError?.message ??
+        tokenError?.message ??
+        'Token row missing and legacy token unavailable'
       console.error(`Token lookup failed for account ${account.id}: ${details}`)
       return new Response(JSON.stringify({ error: 'Access token record not found', details }), {
         status: 500,
@@ -268,6 +278,18 @@ Deno.serve(async (req: Request) => {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })
+    }
+
+    let businessAccessToken: string | null = null
+    if (fbTokenRow?.access_token_enc) {
+      try {
+        businessAccessToken =
+          fbTokenRow.access_token_enc === encryptedToken
+            ? accessToken
+            : await decryptToken(fbTokenRow.access_token_enc, TOKEN_ENCRYPTION_KEY)
+      } catch {
+        console.warn(`Failed to decrypt Business Login token for account ${account.id}`)
+      }
     }
 
     // ── 6. Mark account as syncing ───────────────────────────────────────────
@@ -286,7 +308,7 @@ Deno.serve(async (req: Request) => {
         status: 'started',
         scope: 'all',
         api_host: IG_API_BASE.includes('graph.instagram.com') ? 'graph.instagram.com' : 'unknown',
-        api_version: 'v22.0',
+        api_version: 'v25.0',
         metrics_attempted: [],
         metrics_succeeded: [],
         metrics_failed: [],
@@ -371,23 +393,16 @@ Deno.serve(async (req: Request) => {
           markCapabilityGap(reason)
         }
       } else {
-        const { data: fbTokenFallback, error: fbTokenFallbackError } = await supabase
-          .from('instagram_account_fb_tokens')
-          .select('access_token_enc,token_expires_at')
-          .eq('account_id', account.id)
-          .eq('user_id', accountUserId)
-          .maybeSingle()
-
-        if (fbTokenFallbackError) {
-          console.error(`FB token fallback lookup failed for account ${account.id}: ${fbTokenFallbackError.message}`)
+        if (fbTokenError && !isMissingRelationError(fbTokenError)) {
+          console.error(`FB token fallback lookup failed for account ${account.id}: ${fbTokenError.message}`)
         }
 
-        const expiresAtMs = fbTokenFallback?.token_expires_at
-          ? new Date(fbTokenFallback.token_expires_at).getTime()
+        const expiresAtMs = fbTokenRow?.token_expires_at
+          ? new Date(fbTokenRow.token_expires_at).getTime()
           : null
         const isExpired = expiresAtMs !== null && expiresAtMs <= Date.now()
 
-        canRunBusinessDiscovery = Boolean(fbTokenFallback?.access_token_enc) && !isExpired
+        canRunBusinessDiscovery = Boolean(fbTokenRow?.access_token_enc) && !isExpired
         if (!canRunBusinessDiscovery) {
           const reason = isExpired
             ? 'business_discovery:facebook_token_expired'
@@ -405,7 +420,7 @@ Deno.serve(async (req: Request) => {
               instagram_connected: true,
               facebook_connected: canRunBusinessDiscovery,
               business_discovery_enabled: canRunBusinessDiscovery,
-              facebook_token_expires_at: fbTokenFallback?.token_expires_at ?? null,
+              facebook_token_expires_at: fbTokenRow?.token_expires_at ?? null,
               status_reason: canRunBusinessDiscovery
                 ? 'meta_upgraded'
                 : isExpired
@@ -571,11 +586,13 @@ Deno.serve(async (req: Request) => {
       metricsCsv: string,
       metricType: 'total_value' | 'time_series',
     ): Promise<IGAccountInsightsResponse> {
-      const accountInsightsUrl = new URL(`${IG_API_BASE}/${account.instagram_user_id}/insights`)
+      const accountApiBase = businessAccessToken ? FB_GRAPH_API_BASE : IG_API_BASE
+      const accountInsightsToken = businessAccessToken ?? accessToken
+      const accountInsightsUrl = new URL(`${accountApiBase}/${account.instagram_user_id}/insights`)
       accountInsightsUrl.searchParams.set('metric', metricsCsv)
       accountInsightsUrl.searchParams.set('period', 'day')
       accountInsightsUrl.searchParams.set('metric_type', metricType)
-      accountInsightsUrl.searchParams.set('access_token', accessToken)
+      accountInsightsUrl.searchParams.set('access_token', accountInsightsToken)
 
       const accountInsightsRes = await withRetry(() =>
         fetch(accountInsightsUrl.toString()).then((r) => {
@@ -1013,28 +1030,11 @@ Deno.serve(async (req: Request) => {
             )
             markAttempted(targetMetricKeys)
 
-            const { data: fbTokenRow, error: fbTokenError } = await supabase
-              .from('instagram_account_fb_tokens')
-              .select('access_token_enc')
-              .eq('account_id', account.id)
-              .eq('user_id', accountUserId)
-              .maybeSingle()
-
-            if (fbTokenError || !fbTokenRow?.access_token_enc) {
+            if (!businessAccessToken) {
               businessDiscoveryErrors++
-              const details = fbTokenError?.message ?? 'Missing Facebook token row'
+              const details = fbTokenError?.message ?? 'Missing Business Login token row'
               if (!firstBusinessDiscoveryError) firstBusinessDiscoveryError = details
               console.warn(`Skipping business discovery for ${target.target_username}: ${details}`)
-              markFailed(targetMetricKeys)
-              continue
-            }
-
-            let fbAccessToken: string
-            try {
-              fbAccessToken = await decryptToken(fbTokenRow.access_token_enc, TOKEN_ENCRYPTION_KEY)
-            } catch {
-              businessDiscoveryErrors++
-              if (!firstBusinessDiscoveryError) firstBusinessDiscoveryError = 'Failed to decrypt Facebook token'
               markFailed(targetMetricKeys)
               continue
             }
@@ -1045,7 +1045,7 @@ Deno.serve(async (req: Request) => {
                 'fields',
                 `business_discovery.username(${target.target_username}){id,username,name,profile_picture_url,followers_count,follows_count,media_count}`,
               )
-              discoveryUrl.searchParams.set('access_token', fbAccessToken)
+              discoveryUrl.searchParams.set('access_token', businessAccessToken)
 
               const discoveryRes = await withRetry(() =>
                 fetch(discoveryUrl.toString()).then((r) => {
@@ -1101,7 +1101,7 @@ Deno.serve(async (req: Request) => {
               bdInsightsUrl.searchParams.set('metric', BUSINESS_DISCOVERY_INSIGHTS_METRICS)
               bdInsightsUrl.searchParams.set('period', 'day')
               bdInsightsUrl.searchParams.set('target_username', target.target_username)
-              bdInsightsUrl.searchParams.set('access_token', fbAccessToken)
+              bdInsightsUrl.searchParams.set('access_token', businessAccessToken)
 
               try {
                 const bdInsightsRes = await withRetry(() =>
@@ -1233,7 +1233,7 @@ Deno.serve(async (req: Request) => {
             api_host: requestedScopes.businessDiscovery
               ? 'graph.instagram.com|graph.facebook.com'
               : 'graph.instagram.com',
-            api_version: 'v22.0',
+            api_version: 'v25.0',
             rate_limit_events: rateLimitEvents,
             failure_class: isRateLimited
               ? 'rate_limit'
@@ -1333,7 +1333,7 @@ Deno.serve(async (req: Request) => {
             status: 'error',
             scope: 'all',
             api_host: 'graph.instagram.com|graph.facebook.com',
-            api_version: 'v22.0',
+            api_version: 'v25.0',
             rate_limit_events: rateLimitEvents,
             failure_class: 'provider',
             posts_fetched: postsProcessed,

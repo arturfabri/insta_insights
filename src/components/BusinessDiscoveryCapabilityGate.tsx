@@ -28,15 +28,15 @@ export default function BusinessDiscoveryCapabilityGate({
 
   return (
     <div className="rounded-xl border border-amber-200 bg-amber-50 p-6">
-      <h2 className="text-base font-semibold text-amber-800">Meta connection required</h2>
+      <h2 className="text-base font-semibold text-amber-800">Business connection required</h2>
       <p className="mt-2 text-sm text-amber-700">
-        Business Discovery requires the optional Meta connection for this Instagram account.
+        Business Discovery is available only after the Meta Business Login connection is active for this account.
       </p>
       <Link
         to={`/connect?accountId=${accountId}`}
         className="mt-4 inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
       >
-        Connect Meta
+        Reconnect account
       </Link>
     </div>
   )

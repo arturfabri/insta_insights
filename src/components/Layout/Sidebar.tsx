@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom'
 const navItems = [
   { to: '/', label: 'Dashboard', icon: '📊' },
   { to: '/recommendations', label: 'Recommendations', icon: '✨' },
-  { to: '/connect', label: 'Connect Instagram', icon: '🔗' },
+  { to: '/connect', label: 'Connections', icon: '🔗' },
 ]
 
 interface SidebarProps {

@@ -100,7 +100,7 @@ export default function RecommendationsPage() {
         <div className="text-5xl mb-4">📊</div>
         <h2 className="text-lg font-semibold text-gray-900 mb-2">No posts synced yet</h2>
         <p className="text-sm text-gray-500 mb-6">
-          Sync your Instagram account to unlock pattern analysis and AI-generated content briefs.
+          Connect your Instagram business account through Meta Business Login to unlock pattern analysis and AI-generated content briefs.
         </p>
         <Link
           to="/connect"
