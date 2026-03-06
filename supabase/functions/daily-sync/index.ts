@@ -1,8 +1,9 @@
 /**
  * daily-sync — triggered by a Supabase Dashboard Cron job (or pg_cron).
  *
- * Runs every day at 03:00 UTC. Iterates over all connected Instagram accounts
- * that are not currently syncing and triggers an instagram-sync for each.
+ * Runs every day at 03:00 UTC. Iterates over every connected Instagram account
+ * across the user base, assuming each user owns at most one account row, and
+ * triggers an instagram-sync for each account that is not currently syncing.
  *
  * Authentication: verifies the X-Cron-Secret header against the CRON_SECRET
  * environment variable so only the scheduler can invoke this function.

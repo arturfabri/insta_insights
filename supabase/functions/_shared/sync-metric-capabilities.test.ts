@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ACCOUNT_DAY_TIME_SERIES_CORE_METRICS_CSV,
+  ACCOUNT_DAY_TOTAL_VALUE_ACTIVITY_METRICS_CSV,
+  ACCOUNT_LIFETIME_TOTAL_VALUE_DEMOGRAPHIC_METRICS_CSV,
   buildSyncCapabilityMatrix,
   classifyReturnedMetrics,
   getAccountMetricBundles,
   getMediaMetricBundles,
   resolveSyncWindow,
+  splitMetricsCsv,
 } from './sync-metric-capabilities'
 
 describe('resolveSyncWindow', () => {
@@ -73,13 +77,49 @@ describe('metric bundle planners', () => {
     expect(bundles.advancedGroupId).toBe('media_advanced_standard')
   })
 
-  it('returns core and advanced account bundle groups', () => {
+  it('returns the exact account bundle catalog that matches Meta metric types', () => {
     const bundles = getAccountMetricBundles(matrix)
-    expect(bundles.map((bundle) => bundle.id)).toEqual([
-      'account_time_series_core',
-      'account_total_value_core',
-      'account_time_series_advanced',
-      'account_total_value_advanced',
+    expect(bundles).toEqual([
+      {
+        id: 'account_day_time_series_core',
+        metricType: 'time_series',
+        period: 'day',
+        metricsCsv: ACCOUNT_DAY_TIME_SERIES_CORE_METRICS_CSV,
+        projectionTarget: 'daily',
+        core: true,
+      },
+      {
+        id: 'account_day_total_value_activity',
+        metricType: 'total_value',
+        period: 'day',
+        metricsCsv: ACCOUNT_DAY_TOTAL_VALUE_ACTIVITY_METRICS_CSV,
+        projectionTarget: 'daily',
+        core: true,
+      },
+      {
+        id: 'account_lifetime_total_value_demographics',
+        metricType: 'total_value',
+        period: 'lifetime',
+        metricsCsv: ACCOUNT_LIFETIME_TOTAL_VALUE_DEMOGRAPHIC_METRICS_CSV,
+        projectionTarget: 'facts_only',
+        timeframes: ['last_14_days', 'last_30_days', 'last_90_days', 'prev_month', 'this_month', 'this_week'],
+        breakdowns: ['age', 'city', 'country', 'gender'],
+        core: false,
+      },
+    ])
+  })
+
+  it('does not duplicate account metrics across bundle definitions', () => {
+    const metricsByBundle = getAccountMetricBundles(matrix).map((bundle) => splitMetricsCsv(bundle.metricsCsv))
+    const flatMetrics = metricsByBundle.flat()
+    const duplicatedMetrics = flatMetrics.filter((metric, index) => flatMetrics.indexOf(metric) !== index)
+
+    expect(duplicatedMetrics).toEqual([])
+    expect(splitMetricsCsv(ACCOUNT_DAY_TIME_SERIES_CORE_METRICS_CSV)).toEqual(['reach'])
+    expect(splitMetricsCsv(ACCOUNT_DAY_TOTAL_VALUE_ACTIVITY_METRICS_CSV)).toContain('replies')
+    expect(splitMetricsCsv(ACCOUNT_LIFETIME_TOTAL_VALUE_DEMOGRAPHIC_METRICS_CSV)).toEqual([
+      'engaged_audience_demographics',
+      'follower_demographics',
     ])
   })
 })
@@ -95,13 +135,22 @@ describe('classifyReturnedMetrics', () => {
     expect(coverage.missing).toEqual(['total_interactions', 'reposts'])
   })
 
-  it('matches the observed CSV regression pattern where only six media metrics are returned', () => {
+  it('matches the observed CSV regression pattern where only a subset of metrics are returned', () => {
     const coverage = classifyReturnedMetrics(
-      'reach,views,saved,shares,comments,total_interactions,replies,reposts,profile_activity',
-      ['reach', 'views', 'saved', 'shares', 'comments'],
+      'accounts_engaged,comments,follows_and_unfollows,likes,profile_links_taps,replies,reposts,saves,shares,total_interactions,views',
+      ['accounts_engaged', 'follows_and_unfollows', 'views'],
     )
 
-    expect(coverage.present).toEqual(['reach', 'views', 'saved', 'shares', 'comments'])
-    expect(coverage.missing).toEqual(['total_interactions', 'replies', 'reposts', 'profile_activity'])
+    expect(coverage.present).toEqual(['accounts_engaged', 'follows_and_unfollows', 'views'])
+    expect(coverage.missing).toEqual([
+      'comments',
+      'likes',
+      'profile_links_taps',
+      'replies',
+      'reposts',
+      'saves',
+      'shares',
+      'total_interactions',
+    ])
   })
 })

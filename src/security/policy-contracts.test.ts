@@ -6,6 +6,7 @@ import expansionSql from '../../supabase/migrations/20260302185500_expand_metric
 import capabilitiesSql from '../../supabase/migrations/20260302221500_add_account_capabilities_and_sync_capability_gaps.sql?raw'
 import repairSignalsSql from '../../supabase/migrations/20260306005000_repair_media_insights_and_extend_media_rpc.sql?raw'
 import providerErrorsSql from '../../supabase/migrations/20260306105200_add_sync_log_provider_error_fields.sql?raw'
+import singleAccountSql from '../../supabase/migrations/20260306153000_enforce_single_instagram_account_per_user.sql?raw'
 
 describe('security policy contracts', () => {
   it('moves encrypted tokens into dedicated token table and drops account token column', () => {
@@ -70,5 +71,12 @@ describe('security policy contracts', () => {
     expect(providerErrorsSql).toContain('add column if not exists provider_error_text text')
     expect(providerErrorsSql).toContain("add column if not exists provider_error_details jsonb not null default '{}'::jsonb")
     expect(providerErrorsSql).toContain("column_name in ('provider_error_text', 'provider_error_details')")
+  })
+
+  it('enforces one instagram account per user with duplicate preflight', () => {
+    expect(singleAccountSql).toContain('Duplicate instagram_accounts rows exist for user_id(s)')
+    expect(singleAccountSql).toContain('create unique index if not exists uq_instagram_accounts_user_id')
+    expect(singleAccountSql).toContain('on public.instagram_accounts (user_id)')
+    expect(singleAccountSql).toContain('Verification failed: duplicate instagram_accounts rows still exist per user_id.')
   })
 })

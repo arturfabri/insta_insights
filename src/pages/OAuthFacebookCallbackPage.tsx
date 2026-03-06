@@ -70,8 +70,7 @@ export default function OAuthFacebookCallbackPage() {
         }
 
         setStatus('success')
-        const nextUrl = accountId ? `/connect?accountId=${accountId}` : '/connect'
-        setTimeout(() => navigate(nextUrl), 1500)
+        setTimeout(() => navigate('/connect'), 1500)
       } catch (err) {
         setStatus('error')
         setErrorMessage('An unexpected error occurred. Please try again.')

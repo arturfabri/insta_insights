@@ -12,6 +12,7 @@ const SignupPage = lazy(() => import('@/pages/SignupPage'))
 const ConnectPage = lazy(() => import('@/pages/ConnectPage'))
 const OAuthFacebookCallbackPage = lazy(() => import('@/pages/OAuthFacebookCallbackPage'))
 const DashboardPage = lazy(() => import('@/pages/DashboardPage'))
+const InsightsPage = lazy(() => import('@/pages/InsightsPage'))
 const PostDetailPage = lazy(() => import('@/pages/PostDetailPage'))
 const RecommendationsPage = lazy(() => import('@/pages/RecommendationsPage'))
 
@@ -62,6 +63,7 @@ function AppRoutes() {
           }
         >
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/insights" element={<InsightsPage />} />
           <Route path="/posts/:id" element={<PostDetailPage />} />
           <Route path="/recommendations" element={<RecommendationsPage />} />
           <Route path="/connect" element={<ConnectPage />} />

@@ -30,8 +30,6 @@ export function useSyncStatus(accountId?: string | null): UseSyncStatusResult {
         .eq('user_id', userId)
       if (accountId) {
         query = query.eq('id', accountId)
-      } else {
-        query = query.order('created_at', { ascending: true }).limit(1)
       }
 
       const { data, error } = await query.maybeSingle()

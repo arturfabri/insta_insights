@@ -159,6 +159,7 @@ export interface InstagramAccountInsightsDaily {
   total_interactions: number | null
   likes: number | null
   comments: number | null
+  replies: number | null
   shares: number | null
   saves: number | null
   reposts: number | null

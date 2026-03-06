@@ -8,6 +8,10 @@ import {
   isMissingRelationError,
   isNotNullViolationForColumn,
 } from '../_shared/token-store.ts'
+import {
+  REQUESTED_ACCOUNT_MISMATCH_MESSAGE,
+  resolveSingleAccountLink,
+} from '../_shared/single-account-enforcement.ts'
 
 const META_APP_ID = Deno.env.get('META_APP_ID')!
 const META_APP_SECRET = Deno.env.get('META_APP_SECRET')!
@@ -165,7 +169,7 @@ Deno.serve(async (req: Request) => {
       }
 
       if (accountRow.instagram_user_id !== instagramUserId) {
-        return fail('Meta Business Login returned a different Instagram account than the selected record')
+        return fail(REQUESTED_ACCOUNT_MISMATCH_MESSAGE)
       }
 
       const { error: accountUpdateError } = await supabase
@@ -182,6 +186,31 @@ Deno.serve(async (req: Request) => {
         return fail(`Failed to refresh Instagram account metadata: ${accountUpdateError.message}`)
       }
     } else {
+      const { data: existingAccountRows, error: existingAccountsError } = await supabase
+        .from('instagram_accounts')
+        .select('id, instagram_user_id')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: true })
+        .limit(2)
+
+      if (existingAccountsError) {
+        return fail(`Failed to load existing Instagram account: ${existingAccountsError.message}`)
+      }
+
+      if ((existingAccountRows?.length ?? 0) > 1) {
+        return fail('Multiple Instagram accounts are linked to this user. Resolve duplicates before continuing.')
+      }
+
+      const resolution = resolveSingleAccountLink(
+        existingAccountRows?.[0]
+          ? {
+              id: existingAccountRows[0].id,
+              instagram_user_id: existingAccountRows[0].instagram_user_id,
+            }
+          : null,
+        instagramUserId,
+      )
+
       const accountPayload = {
         user_id: user.id,
         instagram_user_id: instagramUserId,
@@ -191,34 +220,53 @@ Deno.serve(async (req: Request) => {
         sync_error: null,
       }
 
-      let { data: accountRow, error: upsertError } = await supabase
-        .from('instagram_accounts')
-        .upsert(accountPayload, { onConflict: 'user_id,instagram_user_id' })
-        .select('id, user_id')
-        .single()
+      if (resolution.kind === 'different_account_conflict') {
+        return fail(resolution.message)
+      }
 
-      const needsLegacyAccountWrite = isNotNullViolationForColumn(upsertError, 'access_token_enc')
-      if (needsLegacyAccountWrite) {
-        const retry = await supabase
+      if (resolution.kind === 'reuse_existing_account') {
+        resolvedAccountId = resolution.accountId
+
+        const { error: accountUpdateError } = await supabase
           .from('instagram_accounts')
-          .upsert(
-            {
-              ...accountPayload,
-              access_token_enc: encryptedToken,
-            },
-            { onConflict: 'user_id,instagram_user_id' },
-          )
+          .update({
+            username,
+            token_expires_at: tokenExpiresAt,
+            sync_error: null,
+          })
+          .eq('id', resolvedAccountId)
+          .eq('user_id', user.id)
+
+        if (accountUpdateError) {
+          return fail(`Failed to refresh Instagram account metadata: ${accountUpdateError.message}`)
+        }
+      } else {
+        let { data: accountRow, error: insertError } = await supabase
+          .from('instagram_accounts')
+          .insert(accountPayload)
           .select('id, user_id')
           .single()
-        accountRow = retry.data
-        upsertError = retry.error
-      }
 
-      if (upsertError || !accountRow) {
-        return fail(`Failed to upsert Instagram account: ${upsertError?.message ?? 'No account row returned'}`)
-      }
+        const needsLegacyAccountWrite = isNotNullViolationForColumn(insertError, 'access_token_enc')
+        if (needsLegacyAccountWrite) {
+          const retry = await supabase
+            .from('instagram_accounts')
+            .insert({
+              ...accountPayload,
+              access_token_enc: encryptedToken,
+            })
+            .select('id, user_id')
+            .single()
+          accountRow = retry.data
+          insertError = retry.error
+        }
 
-      resolvedAccountId = accountRow.id
+        if (insertError || !accountRow) {
+          return fail(`Failed to create Instagram account: ${insertError?.message ?? 'No account row returned'}`)
+        }
+
+        resolvedAccountId = accountRow.id
+      }
     }
 
     const { data: resolvedAccountRow, error: resolvedAccountError } = await supabase

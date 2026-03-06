@@ -1,4 +1,5 @@
 import { createClient } from 'jsr:@supabase/supabase-js@2'
+import { z } from 'npm:zod@4.3.6'
 import { corsHeaders, handleCors } from '../_shared/cors.ts'
 import { encryptToken } from '../_shared/crypto.ts'
 import { sanitizeProviderError } from '../_shared/provider-error.ts'
@@ -7,12 +8,22 @@ import {
   isMissingRelationError,
   isNotNullViolationForColumn,
 } from '../_shared/token-store.ts'
+import {
+  REQUESTED_ACCOUNT_MISMATCH_MESSAGE,
+  resolveSingleAccountLink,
+} from '../_shared/single-account-enforcement.ts'
 
 const META_APP_ID = Deno.env.get('META_APP_ID')!
 const META_APP_SECRET = Deno.env.get('META_APP_SECRET')!
 const TOKEN_ENCRYPTION_KEY = Deno.env.get('TOKEN_ENCRYPTION_KEY')!
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+
+const InstagramLoginRequestSchema = z.object({
+  code: z.string().trim().min(1),
+  redirectUri: z.string().trim().url(),
+  accountId: z.string().trim().min(1).nullable().optional(),
+})
 
 // Always return HTTP 200 so the Supabase client puts the body in `data` (not in error).
 // Callers check `data.success` to detect failures.
@@ -47,9 +58,12 @@ Deno.serve(async (req: Request) => {
 
     if (authError || !user) return fail('Invalid token')
 
-    const { code, redirectUri } = await req.json() as { code: string; redirectUri: string }
+    const rawBody = await req.json().catch(() => null)
+    const parsedBody = InstagramLoginRequestSchema.safeParse(rawBody)
 
-    if (!code || !redirectUri) return fail('Missing code or redirectUri')
+    if (!parsedBody.success) return fail('Invalid request payload for Instagram Login exchange')
+
+    const { code, redirectUri, accountId } = parsedBody.data
 
     // Step 1: Exchange code for short-lived token
     const tokenParams = new URLSearchParams({
@@ -121,45 +135,124 @@ Deno.serve(async (req: Request) => {
       Date.now() + (expires_in - 86400) * 1000
     ).toISOString()
 
-    const accountPayload = {
-      user_id: user.id,
-      instagram_user_id: instagramUserId,
-      username,
-      token_expires_at: tokenExpiresAt,
-      sync_status: 'pending' as const,
-      sync_error: null,
-    }
+    let accountRow: { id: string; user_id: string } | null = null
 
-    // Primary write path (new schema): account metadata without token column.
-    // Compatibility fallback is applied below if a legacy NOT NULL token column
-    // still exists in the deployed DB.
-    let { data: accountRow, error: upsertError } = await supabase
-      .from('instagram_accounts')
-      .upsert(accountPayload, { onConflict: 'user_id,instagram_user_id' })
-      .select('id, user_id')
-      .single()
-
-    const needsLegacyAccountWrite = isNotNullViolationForColumn(upsertError, 'access_token_enc')
-    if (needsLegacyAccountWrite) {
-      console.warn('Legacy schema detected (access_token_enc NOT NULL); retrying account upsert with token column')
-      const retry = await supabase
+    if (accountId) {
+      const { data: requestedAccount, error: requestedAccountError } = await supabase
         .from('instagram_accounts')
-        .upsert(
-          {
-            ...accountPayload,
-            access_token_enc: encryptedToken,
-          },
-          { onConflict: 'user_id,instagram_user_id' },
-        )
-        .select('id, user_id')
-        .single()
-      accountRow = retry.data
-      upsertError = retry.error
+        .select('id, user_id, instagram_user_id')
+        .eq('id', accountId)
+        .eq('user_id', user.id)
+        .maybeSingle()
+
+      if (requestedAccountError || !requestedAccount) {
+        return fail('Instagram account not found for user')
+      }
+
+      if (requestedAccount.instagram_user_id !== instagramUserId) {
+        return fail(REQUESTED_ACCOUNT_MISMATCH_MESSAGE)
+      }
+
+      const { error: accountUpdateError } = await supabase
+        .from('instagram_accounts')
+        .update({
+          username,
+          token_expires_at: tokenExpiresAt,
+          sync_error: null,
+        })
+        .eq('id', requestedAccount.id)
+        .eq('user_id', requestedAccount.user_id)
+
+      if (accountUpdateError) {
+        return fail(`Step5 (account update): ${accountUpdateError.message}`)
+      }
+
+      accountRow = { id: requestedAccount.id, user_id: requestedAccount.user_id }
+    } else {
+      const { data: existingAccountRows, error: existingAccountsError } = await supabase
+        .from('instagram_accounts')
+        .select('id, instagram_user_id')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: true })
+        .limit(2)
+
+      if (existingAccountsError) {
+        return fail(`Step5 (existing account lookup): ${existingAccountsError.message}`)
+      }
+
+      if ((existingAccountRows?.length ?? 0) > 1) {
+        return fail('Multiple Instagram accounts are linked to this user. Resolve duplicates before continuing.')
+      }
+
+      const resolution = resolveSingleAccountLink(
+        existingAccountRows?.[0]
+          ? {
+              id: existingAccountRows[0].id,
+              instagram_user_id: existingAccountRows[0].instagram_user_id,
+            }
+          : null,
+        instagramUserId,
+      )
+
+      if (resolution.kind === 'different_account_conflict') {
+        return fail(resolution.message)
+      }
+
+      const accountPayload = {
+        user_id: user.id,
+        instagram_user_id: instagramUserId,
+        username,
+        token_expires_at: tokenExpiresAt,
+        sync_status: 'pending' as const,
+        sync_error: null,
+      }
+
+      if (resolution.kind === 'reuse_existing_account') {
+        const { error: accountUpdateError } = await supabase
+          .from('instagram_accounts')
+          .update({
+            username,
+            token_expires_at: tokenExpiresAt,
+            sync_error: null,
+          })
+          .eq('id', resolution.accountId)
+          .eq('user_id', user.id)
+
+        if (accountUpdateError) {
+          return fail(`Step5 (account update): ${accountUpdateError.message}`)
+        }
+
+        accountRow = { id: resolution.accountId, user_id: user.id }
+      } else {
+        let insertResult = await supabase
+          .from('instagram_accounts')
+          .insert(accountPayload)
+          .select('id, user_id')
+          .single()
+
+        if (isNotNullViolationForColumn(insertResult.error, 'access_token_enc')) {
+          console.warn('Legacy schema detected (access_token_enc NOT NULL); retrying account insert with token column')
+          insertResult = await supabase
+            .from('instagram_accounts')
+            .insert({
+              ...accountPayload,
+              access_token_enc: encryptedToken,
+            })
+            .select('id, user_id')
+            .single()
+        }
+
+        if (insertResult.error || !insertResult.data) {
+          console.error('DB insert error:', insertResult.error)
+          return fail(`Step5 (DB insert): ${insertResult.error?.message ?? 'No account row returned'}`)
+        }
+
+        accountRow = insertResult.data
+      }
     }
 
-    if (upsertError || !accountRow) {
-      console.error('DB upsert error:', upsertError)
-      return fail(`Step5 (DB upsert): ${upsertError?.message ?? 'No account row returned'}`)
+    if (!accountRow) {
+      return fail('Step5 (account resolution): no account row available after OAuth')
     }
 
     const { error: tokenError } = await supabase

@@ -44,6 +44,7 @@ Completed in workspace. Full account seed script expansion implemented and local
 3. Use the script’s cleanup block when you want to remove only script-managed seeded rows.
 
 ## Progress Log (Newest First)
+- 2026-03-06 17:04: Updated the seed script so `instagram_account_insights_daily` rows are production-shaped (`metric_type = 'total_value'`, `timeframe = ''`) and added cleanup for legacy seeded daily rows (`seed_total_value` / `seed_day`) to avoid mixed-shape datasets on rerun.
 - 2026-03-06 13:56: Rewrote `scripts/seed-instagram-business-discovery.sql` into full-dataset idempotent seed covering:
   - account sync/capability/token state,
   - media + insights + scoring,
@@ -72,5 +73,6 @@ Completed in workspace. Full account seed script expansion implemented and local
   - `sync_logs`.
 - Seed isolation strategy:
   - media keys use `seed_media_%`,
-  - account insight/fact rows use `metric_type`/`timeframe` seed markers (`seed_total_value`, `seed_snapshot`, `seed_day`, `seed_lifetime`),
+  - `instagram_account_insights_daily` now uses production-shaped rows (`metric_type = 'total_value'`, `timeframe = ''`) so UI reviews match runtime expectations,
+  - `instagram_metric_facts` and business-discovery fact rows still use seed markers (`seed_total_value`, `seed_snapshot`, `seed_day`, `seed_lifetime`) for script-managed cleanup and verification,
   - recommendations and sync logs use deterministic UUIDs.

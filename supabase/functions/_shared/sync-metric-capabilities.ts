@@ -44,12 +44,15 @@ export interface MediaMetricBundles {
 
 export interface AccountMetricBundle {
   id:
-    | 'account_time_series_core'
-    | 'account_total_value_core'
-    | 'account_time_series_advanced'
-    | 'account_total_value_advanced'
+    | 'account_day_time_series_core'
+    | 'account_day_total_value_activity'
+    | 'account_lifetime_total_value_demographics'
   metricType: 'total_value' | 'time_series'
+  period: 'day' | 'lifetime'
   metricsCsv: string
+  projectionTarget: 'daily' | 'facts_only'
+  timeframes?: string[]
+  breakdowns?: string[]
   core: boolean
 }
 
@@ -71,29 +74,23 @@ export const MEDIA_ADVANCED_STANDARD_METRICS_CSV = [
   'profile_activity',
 ].join(',')
 
-export const ACCOUNT_TIME_SERIES_CORE_METRICS_CSV = 'reach'
-export const ACCOUNT_TOTAL_VALUE_CORE_METRICS_CSV = 'reach'
-export const ACCOUNT_TIME_SERIES_ADVANCED_METRICS_CSV = [
-  'views',
-  'total_interactions',
-  'reposts',
-  'saves',
-  'shares',
-  'comments',
-  'likes',
-  'profile_links_taps',
-].join(',')
-export const ACCOUNT_TOTAL_VALUE_ADVANCED_METRICS_CSV = [
+export const ACCOUNT_DAY_TIME_SERIES_CORE_METRICS_CSV = 'reach'
+export const ACCOUNT_DAY_TOTAL_VALUE_ACTIVITY_METRICS_CSV = [
   'accounts_engaged',
+  'comments',
   'follows_and_unfollows',
-  'views',
-  'total_interactions',
+  'likes',
+  'profile_links_taps',
+  'replies',
   'reposts',
   'saves',
   'shares',
-  'comments',
-  'likes',
-  'profile_links_taps',
+  'total_interactions',
+  'views',
+].join(',')
+export const ACCOUNT_LIFETIME_TOTAL_VALUE_DEMOGRAPHIC_METRICS_CSV = [
+  'engaged_audience_demographics',
+  'follower_demographics',
 ].join(',')
 
 function normalizeApiHost(host: string): 'graph.instagram.com' | 'graph.facebook.com' | 'unknown' {
@@ -101,6 +98,41 @@ function normalizeApiHost(host: string): 'graph.instagram.com' | 'graph.facebook
   if (host.includes('graph.facebook.com')) return 'graph.facebook.com'
   return 'unknown'
 }
+
+function createAccountBundle(
+  bundle: AccountMetricBundle,
+): AccountMetricBundle {
+  return bundle
+}
+
+const ACCOUNT_METRIC_BUNDLES: AccountMetricBundle[] = [
+  createAccountBundle({
+    id: 'account_day_time_series_core',
+    metricType: 'time_series',
+    period: 'day',
+    metricsCsv: ACCOUNT_DAY_TIME_SERIES_CORE_METRICS_CSV,
+    projectionTarget: 'daily',
+    core: true,
+  }),
+  createAccountBundle({
+    id: 'account_day_total_value_activity',
+    metricType: 'total_value',
+    period: 'day',
+    metricsCsv: ACCOUNT_DAY_TOTAL_VALUE_ACTIVITY_METRICS_CSV,
+    projectionTarget: 'daily',
+    core: true,
+  }),
+  createAccountBundle({
+    id: 'account_lifetime_total_value_demographics',
+    metricType: 'total_value',
+    period: 'lifetime',
+    metricsCsv: ACCOUNT_LIFETIME_TOTAL_VALUE_DEMOGRAPHIC_METRICS_CSV,
+    projectionTarget: 'facts_only',
+    timeframes: ['last_14_days', 'last_30_days', 'last_90_days', 'prev_month', 'this_month', 'this_week'],
+    breakdowns: ['age', 'city', 'country', 'gender'],
+    core: false,
+  }),
+]
 
 export function resolveSyncWindow(input: ResolveSyncWindowInput): ResolvedSyncWindow {
   const mode: SyncMode = input.syncMode === 'backfill' ? 'backfill' : 'standard'
@@ -186,43 +218,11 @@ export function getMediaMetricBundles(
 }
 
 export function getAccountMetricBundles(matrix: SyncCapabilityMatrix): AccountMetricBundle[] {
-  const bundles: AccountMetricBundle[] = []
-
-  if (matrix.account.coreEnabled) {
-    bundles.push(
-      {
-        id: 'account_time_series_core',
-        metricType: 'time_series',
-        metricsCsv: ACCOUNT_TIME_SERIES_CORE_METRICS_CSV,
-        core: true,
-      },
-      {
-        id: 'account_total_value_core',
-        metricType: 'total_value',
-        metricsCsv: ACCOUNT_TOTAL_VALUE_CORE_METRICS_CSV,
-        core: true,
-      },
-    )
+  if (!matrix.account.coreEnabled) return []
+  if (!matrix.account.advancedEnabled) {
+    return ACCOUNT_METRIC_BUNDLES.filter((bundle) => bundle.id === 'account_day_time_series_core')
   }
-
-  if (matrix.account.advancedEnabled) {
-    bundles.push(
-      {
-        id: 'account_time_series_advanced',
-        metricType: 'time_series',
-        metricsCsv: ACCOUNT_TIME_SERIES_ADVANCED_METRICS_CSV,
-        core: false,
-      },
-      {
-        id: 'account_total_value_advanced',
-        metricType: 'total_value',
-        metricsCsv: ACCOUNT_TOTAL_VALUE_ADVANCED_METRICS_CSV,
-        core: false,
-      },
-    )
-  }
-
-  return bundles
+  return ACCOUNT_METRIC_BUNDLES
 }
 
 export function splitMetricsCsv(metricsCsv: string): string[] {

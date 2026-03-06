@@ -1,8 +1,8 @@
 /**
  * token-refresh — triggered by a Supabase Dashboard Cron job (or pg_cron).
  *
- * Runs every Monday at 09:00 UTC. Finds all Instagram accounts whose
- * access token expires within 14 days and refreshes them via the Instagram
+ * Runs every Monday at 09:00 UTC. Finds each user's single Instagram account
+ * whose access token expires within 14 days and refreshes it via the Instagram
  * long-lived token refresh endpoint.
  *
  * Authentication: X-Cron-Secret header.

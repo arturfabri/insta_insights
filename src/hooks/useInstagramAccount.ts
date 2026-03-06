@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { supabaseClient } from '@/lib/supabase'
 import { useAuth } from '@/context/AuthContext'
 import type { InstagramAccount } from '@/types/database'
@@ -10,14 +10,18 @@ interface UseInstagramAccountResult {
   refetch: () => void
 }
 
+/**
+ * Loads the single Instagram account linked to the current user.
+ * If multiple rows ever appear, the hook fails closed instead of silently
+ * choosing one because the product only supports one account per user.
+ */
 export function useInstagramAccount(): UseInstagramAccountResult {
   const { user } = useAuth()
   const [account, setAccount] = useState<InstagramAccount | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  // Trigger token — incrementing causes the effect to re-run (for refetch)
   const [trigger, setTrigger] = useState(0)
-  const refetch = useCallback(() => setTrigger((n) => n + 1), [])
+  const refetch = useCallback(() => setTrigger((value) => value + 1), [])
 
   const userId = user?.id
 
@@ -28,6 +32,7 @@ export function useInstagramAccount(): UseInstagramAccountResult {
       if (!userId) {
         setAccount(null)
         setLoading(false)
+        setError(null)
         return
       }
 
@@ -41,17 +46,25 @@ export function useInstagramAccount(): UseInstagramAccountResult {
         )
         .eq('user_id', userId)
         .order('created_at', { ascending: true })
-        .limit(1)
-        .maybeSingle()
+        .limit(2)
 
       if (cancelled) return
 
       if (dbError) {
-        setError(dbError.message)
         setAccount(null)
-      } else {
-        setAccount(data as InstagramAccount | null)
+        setError(dbError.message)
+        setLoading(false)
+        return
       }
+
+      if ((data?.length ?? 0) > 1) {
+        setAccount(null)
+        setError('Multiple Instagram accounts are linked to this user. Resolve the duplicate account rows before continuing.')
+        setLoading(false)
+        return
+      }
+
+      setAccount(((data ?? [])[0] as InstagramAccount | undefined) ?? null)
       setLoading(false)
     }
 

@@ -53,6 +53,8 @@ describe('parseMediaListRpcRows', () => {
     expect(result).toHaveLength(1)
     expect(result[0].is_reel).toBe(true)
     expect(result[0].insights?.plays).toBe(75)
+    expect(result[0].insights?.facebook_views).toBe(15)
+    expect(result[0].insights?.completion_rate).toBe(0.4)
     expect(result[0].insights?.total_watch_time_ms).toBe(32000)
   })
 

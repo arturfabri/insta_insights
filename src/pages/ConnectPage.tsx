@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { formatDistanceToNow } from 'date-fns'
-import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
-import { useInstagramAccounts } from '@/hooks/useInstagramAccounts'
+import { useInstagramAccount } from '@/hooks/useInstagramAccount'
 import { useSyncStatus } from '@/hooks/useSyncStatus'
 import { useAccountCapabilities } from '@/hooks/useAccountCapabilities'
 import SyncStatusBanner from '@/components/SyncStatusBanner'
@@ -21,7 +20,6 @@ const SYNC_PERIODS = [
 type SyncPeriodDays = 90 | 180 | 360
 
 const PERIOD_STORAGE_KEY = 'insta_insights_sync_period'
-const ACCOUNT_STORAGE_KEY = 'insta_insights_selected_account_id'
 /** Sync locks older than this are treated as timed-out and can be retried. */
 const STALE_SYNC_MS = 10 * 60 * 1000
 
@@ -30,11 +28,6 @@ function readStoredPeriod(): SyncPeriodDays {
   return ([90, 180, 360] as const).includes(stored as SyncPeriodDays)
     ? (stored as SyncPeriodDays)
     : 90
-}
-
-function readStoredAccountId(): string | null {
-  const stored = localStorage.getItem(ACCOUNT_STORAGE_KEY)
-  return stored && stored.trim().length > 0 ? stored : null
 }
 
 function syncStatusClasses(status: string | null): string {
@@ -77,45 +70,17 @@ function statusCopy(status: ReturnType<typeof deriveConnectionStatus>): {
 }
 
 export default function ConnectPage() {
-  const [searchParams] = useSearchParams()
-  const { accounts, loading, error: accountsError, refetch } = useInstagramAccounts()
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(readStoredAccountId)
+  const { account, loading, error: accountError, refetch } = useInstagramAccount()
   const [syncing, setSyncing] = useState(false)
   const [syncPeriod, setSyncPeriodState] = useState<SyncPeriodDays>(readStoredPeriod)
 
-  useEffect(() => {
-    const accountIdFromQuery = searchParams.get('accountId')
-    if (!accountIdFromQuery) return
-    setSelectedAccountId(accountIdFromQuery)
-  }, [searchParams])
-
-  useEffect(() => {
-    if (!accounts.length) {
-      setSelectedAccountId(null)
-      localStorage.removeItem(ACCOUNT_STORAGE_KEY)
-      return
-    }
-
-    const hasSelected = selectedAccountId && accounts.some((item) => item.id === selectedAccountId)
-    if (hasSelected) return
-
-    const fallbackId = accounts[0].id
-    setSelectedAccountId(fallbackId)
-    localStorage.setItem(ACCOUNT_STORAGE_KEY, fallbackId)
-  }, [accounts, selectedAccountId])
-
-  const activeAccount = useMemo(
-    () => accounts.find((item) => item.id === selectedAccountId) ?? accounts[0] ?? null,
-    [accounts, selectedAccountId],
-  )
-
-  const { syncStatus } = useSyncStatus(activeAccount?.id)
+  const { syncStatus } = useSyncStatus(account?.id)
   const {
     capabilities,
     loading: capabilitiesLoading,
     error: capabilitiesError,
     refetch: refetchCapabilities,
-  } = useAccountCapabilities(activeAccount?.id)
+  } = useAccountCapabilities(account?.id)
 
   const connectionStatus = useMemo(
     () => deriveConnectionStatus(capabilities),
@@ -127,38 +92,33 @@ export default function ConnectPage() {
     setSyncPeriodState(days)
   }
 
-  const onSelectAccount = (accountId: string) => {
-    setSelectedAccountId(accountId)
-    localStorage.setItem(ACCOUNT_STORAGE_KEY, accountId)
-  }
-
   const lastSynced = useMemo(
     () =>
-      activeAccount?.last_synced_at
-        ? formatDistanceToNow(new Date(activeAccount.last_synced_at), { addSuffix: true })
+      account?.last_synced_at
+        ? formatDistanceToNow(new Date(account.last_synced_at), { addSuffix: true })
         : 'Never',
-    [activeAccount],
+    [account],
   )
 
   const tokenWarning = useMemo(() => {
-    if (!activeAccount) return false
+    if (!account) return false
     const fourteenDaysFromNow = new Date()
     fourteenDaysFromNow.setDate(fourteenDaysFromNow.getDate() + 14)
-    return new Date(activeAccount.token_expires_at) < fourteenDaysFromNow
-  }, [activeAccount])
+    return new Date(account.token_expires_at) < fourteenDaysFromNow
+  }, [account])
 
   const isStaleSyncing = useMemo(() => {
-    if (syncStatus !== 'syncing' || !activeAccount) return false
-    return Date.now() - new Date(activeAccount.updated_at).getTime() > STALE_SYNC_MS
-  }, [syncStatus, activeAccount])
+    if (syncStatus !== 'syncing' || !account) return false
+    return Date.now() - new Date(account.updated_at).getTime() > STALE_SYNC_MS
+  }, [syncStatus, account])
 
   const connectUrl = useMemo(
-    () => buildBusinessLoginUrl(activeAccount?.id ?? null),
-    [activeAccount?.id],
+    () => buildBusinessLoginUrl(account?.id ?? null),
+    [account?.id],
   )
 
   const invokeSync = useCallback(async () => {
-    if (!activeAccount || syncing || connectionStatus !== 'connected') return
+    if (!account || syncing || connectionStatus !== 'connected') return
     if (syncStatus === 'syncing' && !isStaleSyncing) return
 
     setSyncing(true)
@@ -171,7 +131,7 @@ export default function ConnectPage() {
         firstInsightError: string | null
         partial: boolean
       }>('instagram-sync', {
-        body: { accountId: activeAccount.id, syncPeriodDays: syncPeriod },
+        body: { accountId: account.id, syncPeriodDays: syncPeriod },
       })
 
       if (error) {
@@ -200,7 +160,7 @@ export default function ConnectPage() {
       setSyncing(false)
     }
   }, [
-    activeAccount,
+    account,
     connectionStatus,
     isStaleSyncing,
     refetch,
@@ -211,10 +171,10 @@ export default function ConnectPage() {
   ])
 
   useEffect(() => {
-    if (!activeAccount || connectionStatus !== 'connected') return
-    if (activeAccount.last_synced_at || syncStatus === 'syncing') return
+    if (!account || connectionStatus !== 'connected') return
+    if (account.last_synced_at || syncStatus === 'syncing') return
     void invokeSync()
-  }, [activeAccount, connectionStatus, invokeSync, syncStatus])
+  }, [account, connectionStatus, invokeSync, syncStatus])
 
   if (loading) {
     return (
@@ -224,7 +184,7 @@ export default function ConnectPage() {
     )
   }
 
-  if (!activeAccount) {
+  if (!account) {
     return (
       <div className="max-w-2xl mx-auto mt-16 px-4 text-center">
         <div className="text-5xl mb-4">📸</div>
@@ -241,9 +201,9 @@ export default function ConnectPage() {
             <li>Some demographic metrics only appear once the account has enough follower or engagement volume.</li>
           </ul>
 
-          {accountsError && (
+          {accountError && (
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-              Could not load your existing accounts: {accountsError}
+              Could not load your existing account: {accountError}
             </div>
           )}
 
@@ -271,32 +231,12 @@ export default function ConnectPage() {
         <h1 className="text-2xl font-bold text-gray-900 mb-6">Connections</h1>
 
         <div className="rounded-xl border border-gray-200 bg-white p-6">
-          {accounts.length > 1 && (
-            <div className="mb-4">
-              <label htmlFor="account-select" className="block text-xs font-medium text-gray-500 mb-2">
-                Account
-              </label>
-              <select
-                id="account-select"
-                value={activeAccount.id}
-                onChange={(event) => onSelectAccount(event.target.value)}
-                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:border-brand-500 focus:outline-none"
-              >
-                {accounts.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    @{item.username}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
           <div className="flex items-center gap-3 mb-4">
             <div className="w-10 h-10 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 font-bold text-lg">
               @
             </div>
             <div>
-              <p className="font-semibold text-gray-900">@{activeAccount.username}</p>
+              <p className="font-semibold text-gray-900">@{account.username}</p>
               <p className="text-sm text-gray-500">{connection.badge}</p>
             </div>
           </div>
@@ -354,38 +294,18 @@ export default function ConnectPage() {
       )}
 
       <div className="bg-white rounded-xl border border-gray-200 p-6">
-        {accounts.length > 1 && (
-          <div className="mb-4">
-            <label htmlFor="account-select" className="block text-xs font-medium text-gray-500 mb-2">
-              Connected account
-            </label>
-            <select
-              id="account-select"
-              value={activeAccount.id}
-              onChange={(event) => onSelectAccount(event.target.value)}
-              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:border-brand-500 focus:outline-none"
-            >
-              {accounts.map((item) => (
-                <option key={item.id} value={item.id}>
-                  @{item.username}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 font-bold text-lg">
             @
           </div>
           <div>
-            <p className="font-semibold text-gray-900">@{activeAccount.username}</p>
+            <p className="font-semibold text-gray-900">@{account.username}</p>
             <p className="text-sm text-gray-500">Business Login active</p>
           </div>
           <span
-            className={`ml-auto text-xs px-2 py-1 rounded-full font-medium ${syncStatusClasses(syncStatus ?? activeAccount.sync_status)}`}
+            className={`ml-auto text-xs px-2 py-1 rounded-full font-medium ${syncStatusClasses(syncStatus ?? account.sync_status)}`}
           >
-            {syncStatus ?? activeAccount.sync_status}
+            {syncStatus ?? account.sync_status}
           </span>
         </div>
 
@@ -444,9 +364,9 @@ export default function ConnectPage() {
           </div>
         )}
 
-        {activeAccount.sync_error && syncStatus !== 'syncing' && (
+        {account.sync_error && syncStatus !== 'syncing' && (
           <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-            Sync error: {activeAccount.sync_error}
+            Sync error: {account.sync_error}
           </div>
         )}
 

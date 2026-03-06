@@ -3,12 +3,12 @@ import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import ConnectPage from './ConnectPage'
 
-const mockUseInstagramAccounts = vi.fn()
+const mockUseInstagramAccount = vi.fn()
 const mockUseSyncStatus = vi.fn()
 const mockUseAccountCapabilities = vi.fn()
 
-vi.mock('@/hooks/useInstagramAccounts', () => ({
-  useInstagramAccounts: (...args: unknown[]) => mockUseInstagramAccounts(...args),
+vi.mock('@/hooks/useInstagramAccount', () => ({
+  useInstagramAccount: (...args: unknown[]) => mockUseInstagramAccount(...args),
 }))
 
 vi.mock('@/hooks/useSyncStatus', () => ({
@@ -45,8 +45,8 @@ describe('ConnectPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
-    mockUseInstagramAccounts.mockReturnValue({
-      accounts: [],
+    mockUseInstagramAccount.mockReturnValue({
+      account: null,
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -80,21 +80,19 @@ describe('ConnectPage', () => {
   })
 
   it('requires reconnect and hides sync controls for legacy accounts without a business-login capability row', () => {
-    mockUseInstagramAccounts.mockReturnValue({
-      accounts: [
-        {
-          id: 'acc-1',
-          user_id: 'user-1',
-          instagram_user_id: 'ig-1',
-          username: 'creator',
-          token_expires_at: '2030-01-01T00:00:00.000Z',
-          last_synced_at: null,
-          sync_status: 'pending',
-          sync_error: null,
-          created_at: '2026-03-01T00:00:00.000Z',
-          updated_at: '2026-03-01T00:00:00.000Z',
-        },
-      ],
+    mockUseInstagramAccount.mockReturnValue({
+      account: {
+        id: 'acc-1',
+        user_id: 'user-1',
+        instagram_user_id: 'ig-1',
+        username: 'creator',
+        token_expires_at: '2030-01-01T00:00:00.000Z',
+        last_synced_at: null,
+        sync_status: 'pending',
+        sync_error: null,
+        created_at: '2026-03-01T00:00:00.000Z',
+        updated_at: '2026-03-01T00:00:00.000Z',
+      },
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -111,21 +109,19 @@ describe('ConnectPage', () => {
   })
 
   it('shows sync controls after a valid business-login capability is present', () => {
-    mockUseInstagramAccounts.mockReturnValue({
-      accounts: [
-        {
-          id: 'acc-1',
-          user_id: 'user-1',
-          instagram_user_id: 'ig-1',
-          username: 'creator',
-          token_expires_at: '2030-01-01T00:00:00.000Z',
-          last_synced_at: '2026-03-02T00:00:00.000Z',
-          sync_status: 'complete',
-          sync_error: null,
-          created_at: '2026-03-01T00:00:00.000Z',
-          updated_at: '2026-03-02T00:00:00.000Z',
-        },
-      ],
+    mockUseInstagramAccount.mockReturnValue({
+      account: {
+        id: 'acc-1',
+        user_id: 'user-1',
+        instagram_user_id: 'ig-1',
+        username: 'creator',
+        token_expires_at: '2030-01-01T00:00:00.000Z',
+        last_synced_at: '2026-03-02T00:00:00.000Z',
+        sync_status: 'complete',
+        sync_error: null,
+        created_at: '2026-03-01T00:00:00.000Z',
+        updated_at: '2026-03-02T00:00:00.000Z',
+      },
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -157,5 +153,6 @@ describe('ConnectPage', () => {
 
     expect(screen.getByText(/business login active/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /sync now/i })).toBeInTheDocument()
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
   })
 })

@@ -25,6 +25,9 @@ import {
   resolveSyncWindow,
   type SyncPeriodDays,
 } from '../_shared/sync-metric-capabilities.ts'
+import {
+  projectAccountFactsToDailyRows,
+} from '../_shared/account-insights-daily-projection.ts'
 
 // ─── Environment ────────────────────────────────────────────────────────────
 
@@ -106,6 +109,16 @@ interface BusinessDiscoveryTargetRow {
   target_username: string
 }
 
+interface InstagramAccountRow {
+  id: string
+  user_id: string
+  instagram_user_id: string
+  username: string
+  sync_status: string | null
+  updated_at: string
+  [key: string]: unknown
+}
+
 interface SyncScopesRequest {
   media: boolean
   account: boolean
@@ -179,11 +192,42 @@ Deno.serve(async (req: Request) => {
     const requestedScopes = normalizeSyncScopes(body.syncScopes)
 
     // ── 3. Fetch account ─────────────────────────────────────────────────────
-    let accountQuery = supabase.from('instagram_accounts').select('*')
+    let account: InstagramAccountRow | null = null
+    let accountError: { message?: string } | null = null
+
     if (caller.kind === 'user') {
-      accountQuery = accountQuery.eq('user_id', caller.userId)
       if (body.accountId) {
-        accountQuery = accountQuery.eq('id', body.accountId)
+        const result = await supabase
+          .from('instagram_accounts')
+          .select('*')
+          .eq('user_id', caller.userId)
+          .eq('id', body.accountId)
+          .maybeSingle()
+        account = result.data
+        accountError = result.error
+      } else {
+        const result = await supabase
+          .from('instagram_accounts')
+          .select('*')
+          .eq('user_id', caller.userId)
+          .order('created_at', { ascending: true })
+          .limit(2)
+
+        if (result.error) {
+          accountError = result.error
+        } else if ((result.data?.length ?? 0) > 1) {
+          return new Response(
+            JSON.stringify({
+              error: 'Multiple Instagram accounts are linked to this user. Resolve duplicates before syncing.',
+            }),
+            {
+              status: 409,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            },
+          )
+        } else {
+          account = result.data?.[0] ?? null
+        }
       }
     } else {
       if (!body.accountId) {
@@ -192,13 +236,15 @@ Deno.serve(async (req: Request) => {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         })
       }
-      accountQuery = accountQuery.eq('id', body.accountId)
-    }
 
-    const { data: account, error: accountError } = await accountQuery
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle()
+      const result = await supabase
+        .from('instagram_accounts')
+        .select('*')
+        .eq('id', body.accountId)
+        .maybeSingle()
+      account = result.data
+      accountError = result.error
+    }
 
     if (accountError || !account) {
       return new Response(JSON.stringify({ error: 'Instagram account not found' }), {
@@ -457,101 +503,11 @@ Deno.serve(async (req: Request) => {
       metricType: 'total_value' | 'time_series',
     ): Promise<{ error: string | null }> {
       if (rows.length === 0) return { error: null }
-
-      const byDate = new Map<string, {
-        account_id: string
-        user_id: string
-        metric_date: string
-        metric_type: string
-        timeframe: string
-        accounts_engaged: number | null
-        reach: number | null
-        views: number | null
-        total_interactions: number | null
-        likes: number | null
-        comments: number | null
-        shares: number | null
-        saves: number | null
-        reposts: number | null
-        profile_links_taps: number | null
-        follows: number | null
-        unfollows: number | null
-        net_follower_growth: number | null
-      }>()
-
-      for (const fact of rows) {
-        const key = `${fact.metric_date}|${fact.timeframe}`
-        if (!byDate.has(key)) {
-          byDate.set(key, {
-            account_id: account.id,
-            user_id: accountUserId,
-            metric_date: fact.metric_date,
-            metric_type: metricType,
-            timeframe: fact.timeframe,
-            accounts_engaged: null,
-            reach: null,
-            views: null,
-            total_interactions: null,
-            likes: null,
-            comments: null,
-            shares: null,
-            saves: null,
-            reposts: null,
-            profile_links_taps: null,
-            follows: null,
-            unfollows: null,
-            net_follower_growth: null,
-          })
-        }
-
-        const row = byDate.get(key)!
-        const numericValue = fact.metric_value_numeric
-        switch (fact.metric_name) {
-          case 'accounts_engaged':
-            row.accounts_engaged = numericValue
-            break
-          case 'reach':
-            row.reach = numericValue
-            break
-          case 'views':
-            row.views = numericValue
-            break
-          case 'total_interactions':
-            row.total_interactions = numericValue
-            break
-          case 'likes':
-            row.likes = numericValue
-            break
-          case 'comments':
-            row.comments = numericValue
-            break
-          case 'shares':
-            row.shares = numericValue
-            break
-          case 'saves':
-            row.saves = numericValue
-            break
-          case 'reposts':
-            row.reposts = numericValue
-            break
-          case 'profile_links_taps':
-            row.profile_links_taps = numericValue
-            break
-          case 'follows_and_unfollows':
-            if (fact.metric_value_jsonb && typeof fact.metric_value_jsonb === 'object') {
-              const followsValue = Number((fact.metric_value_jsonb as Record<string, unknown>).follows ?? 0)
-              const unfollowsValue = Number((fact.metric_value_jsonb as Record<string, unknown>).unfollows ?? 0)
-              row.follows = Number.isFinite(followsValue) ? followsValue : 0
-              row.unfollows = Number.isFinite(unfollowsValue) ? unfollowsValue : 0
-              row.net_follower_growth = (row.follows ?? 0) - (row.unfollows ?? 0)
-            }
-            break
-        }
-      }
+      const projectionRows = projectAccountFactsToDailyRows(rows, account.id, accountUserId, metricType)
 
       const { error } = await supabase
         .from('instagram_account_insights_daily')
-        .upsert([...byDate.values()], {
+        .upsert(projectionRows, {
           onConflict: 'account_id,metric_date,metric_type,timeframe',
         })
 
@@ -585,13 +541,18 @@ Deno.serve(async (req: Request) => {
     async function fetchAccountInsightsPayload(
       metricsCsv: string,
       metricType: 'total_value' | 'time_series',
+      period: 'day' | 'lifetime',
+      timeframe?: string,
+      breakdown?: string,
     ): Promise<IGAccountInsightsResponse> {
       const accountApiBase = businessAccessToken ? FB_GRAPH_API_BASE : IG_API_BASE
       const accountInsightsToken = businessAccessToken ?? accessToken
       const accountInsightsUrl = new URL(`${accountApiBase}/${account.instagram_user_id}/insights`)
       accountInsightsUrl.searchParams.set('metric', metricsCsv)
-      accountInsightsUrl.searchParams.set('period', 'day')
+      accountInsightsUrl.searchParams.set('period', period)
       accountInsightsUrl.searchParams.set('metric_type', metricType)
+      if (timeframe) accountInsightsUrl.searchParams.set('timeframe', timeframe)
+      if (breakdown) accountInsightsUrl.searchParams.set('breakdown', breakdown)
       accountInsightsUrl.searchParams.set('access_token', accountInsightsToken)
 
       const accountInsightsRes = await withRetry(() =>
@@ -607,6 +568,14 @@ Deno.serve(async (req: Request) => {
         throw new Error(`Account insights request failed (HTTP ${accountInsightsRes.status})`)
       }
       return accountInsightsBody
+    }
+
+    function expandAccountBundleRequests(bundle: ReturnType<typeof getAccountMetricBundles>[number]) {
+      const timeframes = bundle.timeframes?.length ? bundle.timeframes : [undefined]
+      const breakdowns = bundle.breakdowns?.length ? bundle.breakdowns : [undefined]
+      return timeframes.flatMap((timeframe) =>
+        breakdowns.map((breakdown) => ({ timeframe, breakdown })),
+      )
     }
 
     try {
@@ -877,126 +846,151 @@ Deno.serve(async (req: Request) => {
 
           const accountMetricKeys = metricKeys('account', bundle.metricType, bundle.metricsCsv)
           markAttempted(accountMetricKeys)
+          const requestVariants = expandAccountBundleRequests(bundle)
 
-          try {
-            const accountInsightsBody = await fetchAccountInsightsPayload(
-              bundle.metricsCsv,
-              bundle.metricType,
-            )
-            if (accountInsightsBody.error) {
-              const errMsg = `[code ${accountInsightsBody.error.code}] ${accountInsightsBody.error.message}`
-              if (!bundle.core && isInvalidMetricError(accountInsightsBody.error)) {
-                disabledAccountAdvancedBundles.add(bundle.id)
-                markCapabilityGap(`account:${bundle.id}:unsupported`)
-                console.warn(`Account advanced metrics unsupported (${bundle.id}): ${errMsg}`)
-              } else {
-                accountInsightErrors++
-                if (!firstAccountInsightError) firstAccountInsightError = errMsg
-                console.warn(`Account insights API error (${bundle.id}): ${errMsg}`)
+          for (const requestVariant of requestVariants) {
+            try {
+              const accountInsightsBody = await fetchAccountInsightsPayload(
+                bundle.metricsCsv,
+                bundle.metricType,
+                bundle.period,
+                requestVariant.timeframe,
+                requestVariant.breakdown,
+              )
+              if (accountInsightsBody.error) {
+                const errMsg = `[code ${accountInsightsBody.error.code}] ${accountInsightsBody.error.message}`
+                if (!bundle.core && isInvalidMetricError(accountInsightsBody.error)) {
+                  disabledAccountAdvancedBundles.add(bundle.id)
+                  markCapabilityGap(`account:${bundle.id}:unsupported`)
+                  console.warn(`Account advanced metrics unsupported (${bundle.id}): ${errMsg}`)
+                } else if (bundle.projectionTarget === 'facts_only') {
+                  markCapabilityGap(`account:${bundle.id}:unavailable`)
+                  console.warn(`Optional account insights unavailable (${bundle.id}): ${errMsg}`)
+                } else {
+                  accountInsightErrors++
+                  if (!firstAccountInsightError) firstAccountInsightError = errMsg
+                  console.warn(`Account insights API error (${bundle.id}): ${errMsg}`)
+                }
+                markFailed(accountMetricKeys)
+                continue
               }
-              markFailed(accountMetricKeys)
-              continue
-            }
 
-            const returnedMetrics = accountInsightsBody.data ?? []
-            const coverage = classifyReturnedMetrics(
-              bundle.metricsCsv,
-              returnedMetrics.map((metric) => metric.name),
-            )
-            const succeededBundleKeys = coverage.present.map(
-              (metric) => `account:${bundle.metricType}:${metric}`,
-            )
-            const missingBundleKeys = coverage.missing.map(
-              (metric) => `account:${bundle.metricType}:${metric}`,
-            )
+              const returnedMetrics = accountInsightsBody.data ?? []
+              const coverage = classifyReturnedMetrics(
+                bundle.metricsCsv,
+                returnedMetrics.map((metric) => metric.name),
+              )
+              const succeededBundleKeys = coverage.present.map(
+                (metric) => `account:${bundle.metricType}:${metric}`,
+              )
+              const missingBundleKeys = coverage.missing.map(
+                (metric) => `account:${bundle.metricType}:${metric}`,
+              )
 
-            if (succeededBundleKeys.length === 0) {
+              if (succeededBundleKeys.length === 0) {
+                if (!bundle.core) {
+                  disabledAccountAdvancedBundles.add(bundle.id)
+                  markCapabilityGap(`account:${bundle.id}:empty`)
+                } else if (bundle.projectionTarget === 'facts_only') {
+                  markCapabilityGap(`account:${bundle.id}:empty`)
+                } else {
+                  accountInsightErrors++
+                  if (!firstAccountInsightError) {
+                    firstAccountInsightError = `No account metrics returned for ${bundle.id}`
+                  }
+                }
+                markFailed(accountMetricKeys)
+                continue
+              }
+
+              markSucceeded(succeededBundleKeys)
+              if (missingBundleKeys.length > 0) {
+                markFailed(missingBundleKeys)
+                markCapabilityGap(`account:${bundle.id}:partial`)
+              }
+
+              const fetchedAtIso = new Date().toISOString()
+              const fetchDate = normalizeFetchDate(fetchedAtIso)
+              const accountFacts = mapAccountMetricsToFacts({
+                userId: accountUserId,
+                accountId: account.id,
+                scope: 'account',
+                entityId: account.id,
+                metrics: returnedMetrics,
+                fetchDate,
+                fetchedAtIso,
+                metricSeriesType: bundle.metricType,
+                metricType: bundle.metricType,
+                timeframe: requestVariant.timeframe,
+                breakdownType: requestVariant.breakdown,
+              })
+              const factsResult = await upsertMetricFacts(accountFacts)
+              if (factsResult.error) {
+                console.error(`Account metric facts upsert failed (${bundle.id}): ${factsResult.error}`)
+                accountInsightErrors++
+                if (!firstAccountInsightError) firstAccountInsightError = factsResult.error
+                markFailed(accountMetricKeys)
+                continue
+              }
+
+              if (bundle.projectionTarget === 'daily') {
+                const projectionResult = await upsertAccountDailyProjection(
+                  accountFacts,
+                  bundle.metricType,
+                )
+                if (projectionResult.error) {
+                  console.error(`Account daily projection upsert failed (${bundle.id}): ${projectionResult.error}`)
+                  accountInsightErrors++
+                  if (!firstAccountInsightError) firstAccountInsightError = projectionResult.error
+                }
+              }
+            } catch (accountInsightsErr) {
+              if (accountInsightsErr instanceof RateLimitError) {
+                console.error('Rate limit exhausted during account insights fetch')
+                isRateLimited = true
+                rateLimitEvents++
+                markFailed(accountMetricKeys)
+                break
+              }
+
+              let errStr: string
+              if (accountInsightsErr instanceof Response) {
+                errStr = `HTTP ${accountInsightsErr.status}`
+                try {
+                  const body = await accountInsightsErr.clone().json() as {
+                    error?: { message?: string; code?: number }
+                  }
+                  if (body.error?.message) {
+                    errStr = body.error.code
+                      ? `[${body.error.code}] ${body.error.message}`
+                      : body.error.message
+                  }
+                } catch { /* keep HTTP status message */ }
+              } else if (accountInsightsErr instanceof Error) {
+                errStr = accountInsightsErr.message
+              } else {
+                errStr = String(accountInsightsErr)
+              }
+
+              console.warn(`Account insights unavailable (${bundle.id}): ${errStr}`)
+              if (bundle.projectionTarget === 'facts_only') {
+                markCapabilityGap(`account:${bundle.id}:transient_error`)
+                markFailed(accountMetricKeys)
+                continue
+              }
+
               if (!bundle.core) {
-                disabledAccountAdvancedBundles.add(bundle.id)
-                markCapabilityGap(`account:${bundle.id}:empty`)
-              } else {
-                accountInsightErrors++
-                if (!firstAccountInsightError) {
-                  firstAccountInsightError = `No account metrics returned for ${bundle.id}`
-                }
+                markCapabilityGap(`account:${bundle.id}:transient_error`)
               }
-              markFailed(accountMetricKeys)
-              continue
-            }
-
-            markSucceeded(succeededBundleKeys)
-            if (missingBundleKeys.length > 0) {
-              markFailed(missingBundleKeys)
-              markCapabilityGap(`account:${bundle.id}:partial`)
-            }
-
-            const fetchedAtIso = new Date().toISOString()
-            const fetchDate = normalizeFetchDate(fetchedAtIso)
-            const accountFacts = mapAccountMetricsToFacts({
-              userId: accountUserId,
-              accountId: account.id,
-              scope: 'account',
-              entityId: account.id,
-              metrics: returnedMetrics,
-              fetchDate,
-              fetchedAtIso,
-              metricSeriesType: bundle.metricType,
-              metricType: bundle.metricType,
-            })
-            const factsResult = await upsertMetricFacts(accountFacts)
-            if (factsResult.error) {
-              console.error(`Account metric facts upsert failed (${bundle.id}): ${factsResult.error}`)
               accountInsightErrors++
-              if (!firstAccountInsightError) firstAccountInsightError = factsResult.error
+              if (!firstAccountInsightError) firstAccountInsightError = errStr
               markFailed(accountMetricKeys)
-              continue
             }
 
-            const projectionResult = await upsertAccountDailyProjection(
-              accountFacts,
-              bundle.metricType,
-            )
-            if (projectionResult.error) {
-              console.error(`Account daily projection upsert failed (${bundle.id}): ${projectionResult.error}`)
-              accountInsightErrors++
-              if (!firstAccountInsightError) firstAccountInsightError = projectionResult.error
-            }
-          } catch (accountInsightsErr) {
-            if (accountInsightsErr instanceof RateLimitError) {
-              console.error('Rate limit exhausted during account insights fetch')
-              isRateLimited = true
-              rateLimitEvents++
-              markFailed(accountMetricKeys)
-              break
-            }
-
-            let errStr: string
-            if (accountInsightsErr instanceof Response) {
-              errStr = `HTTP ${accountInsightsErr.status}`
-              try {
-                const body = await accountInsightsErr.clone().json() as {
-                  error?: { message?: string; code?: number }
-                }
-                if (body.error?.message) {
-                  errStr = body.error.code
-                    ? `[${body.error.code}] ${body.error.message}`
-                    : body.error.message
-                }
-              } catch { /* keep HTTP status message */ }
-            } else if (accountInsightsErr instanceof Error) {
-              errStr = accountInsightsErr.message
-            } else {
-              errStr = String(accountInsightsErr)
-            }
-
-            console.warn(`Account insights unavailable (${bundle.id}): ${errStr}`)
-            if (!bundle.core) {
-              markCapabilityGap(`account:${bundle.id}:transient_error`)
-            }
-            accountInsightErrors++
-            if (!firstAccountInsightError) firstAccountInsightError = errStr
-            markFailed(accountMetricKeys)
+            if (isRateLimited) break
           }
+
+          if (isRateLimited) break
         }
       }
 
